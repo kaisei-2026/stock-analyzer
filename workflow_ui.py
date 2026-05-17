@@ -52,19 +52,25 @@ def render_investment_ideas(ticker: str = None) -> None:
     if st.button("🔍 おすすめ銘柄をスキャン", type="primary"):
         with st.spinner("市場データを取得中..."):
             picks = PICKS_FOR_SMALL_CAPITAL
-            closes = fetch_recommendation_closes([p["ticker"] for p in picks])
+            closes = fetch_recommendation_closes([p.ticker for p in picks])
             
             valid_picks = []
             for p in picks:
-                ticker_code = p["ticker"]
+                ticker_code = p.ticker
                 if ticker_code in closes:
                     price = closes[ticker_code]
                     cost = unit_cost_yen(price)
                     if cost <= max_capital:
-                        p_copy = p.copy()
-                        p_copy["price"] = price
-                        p_copy["cost"] = cost
-                        valid_picks.append(p_copy)
+                        valid_picks.append(
+                            {
+                                "ticker": p.ticker,
+                                "name": p.name,
+                                "category": p.category,
+                                "note": p.note,
+                                "price": price,
+                                "cost": cost,
+                            }
+                        )
             
             if not valid_picks:
                 st.warning("条件に合う銘柄が見つかりませんでした。予算を上げるか、別のタイミングでお試しください。")
