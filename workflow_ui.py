@@ -13,10 +13,12 @@ from backtest_engine import run_backtest, equity_curve_for_plot
 from data_store import (
     add_knowledge,
     demo_buy,
+    demo_sell,
     list_knowledge,
     load_demo_account,
+    reset_demo_account,
 )
-from market_data import fetch_recommendation_closes
+from market_data import fetch_live_close, fetch_recommendation_closes
 from recommendations import PICKS_FOR_SMALL_CAPITAL, unit_cost_yen
 
 
@@ -223,26 +225,90 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
 
 
 def render_demo_trade(ticker: str, planning_cash: float) -> None:
-    st.markdown(f"## 🛒 {ticker} のデモトレード")
+    st.markdown(f"## 🛒 デモトレード練習場")
+    st.write("仮想資金を使って、実際の株価（1分更新）で売買の練習ができます。")
+    
     account = load_demo_account()
-    st.metric("余力現金", f"¥{account['cash']:,.0f}")
     
-    # 簡易版：銘柄コードと金額を入力して買う
-    col1, col2 = st.columns(2)
-    with col1:
-        buy_ticker = st.text_input("買う銘柄", value=ticker)
-    with col2:
-        buy_amount = st.number_input("株数", min_value=1, value=1, step=1)
+    # サマリー表示
+    c1, c2, c3 = st.columns(3)
+    c1.metric("余力現金", f"¥{account['cash']:,.0f}")
     
-    if st.button("🤝 買い注文", type="primary"):
-        # 簡略版：現在価格を仮定
-        current_price = 2500.0
-        res = demo_buy(buy_ticker, buy_amount, current_price)
-        if res["ok"]:
-            st.success("購入完了")
-            st.rerun()
+    # 現在価格の取得
+    current_price = fetch_live_close(ticker) if ticker else None
+    
+    with st.expander("🆕 新規注文", expanded=True):
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            buy_ticker = st.text_input("銘柄コード", value=ticker if ticker else "", placeholder="例: 7203")
+        with col2:
+            buy_amount = st.number_input("株数", min_value=1, value=100, step=100)
+        with col3:
+            if current_price:
+                st.write(f"現在値: ¥{current_price:,.1f}")
+                cost = buy_amount * current_price
+                st.write(f"概算: ¥{cost:,.0f}")
+            else:
+                st.write("価格取得中...")
+
+        if st.button("🤝 買い注文を実行", type="primary", use_container_width=True):
+            if not current_price:
+                current_price = fetch_live_close(buy_ticker)
+            
+            if current_price:
+                account, msg = demo_buy(account, buy_ticker, buy_amount, current_price)
+                if "成功" in msg or "記録" in msg:
+                    st.success(f"{buy_ticker} を {buy_amount}株 購入しました。")
+                    st.rerun()
+                else:
+                    st.error(msg)
+            else:
+                st.error("株価が取得できませんでした。銘柄コードを確認してください。")
+
+    # 保有ポジション
+    st.markdown("### 📊 保有ポジション")
+    if account["positions"]:
+        pos_data = []
+        for t, pos in account["positions"].items():
+            px = fetch_live_close(t) or pos["avg_price"]
+            profit = (px - pos["avg_price"]) * pos["shares"]
+            profit_pct = (px - pos["avg_price"]) / pos["avg_price"] * 100
+            pos_data.append({
+                "銘柄": t,
+                "保有数": pos["shares"],
+                "平均取得単価": f"¥{pos['avg_price']:,.1f}",
+                "現在値": f"¥{px:,.1f}",
+                "評価損益": f"¥{profit:+,.0f}",
+                "損益率": f"{profit_pct:+.2f}%"
+            })
+        st.dataframe(pd.DataFrame(pos_data), use_container_width=True, hide_index=True)
+        
+        # 売却フォーム
+        with st.expander("🚪 ポジションを閉じる（売却）"):
+            sell_ticker = st.selectbox("売却する銘柄", options=list(account["positions"].keys()))
+            max_shares = account["positions"][sell_ticker]["shares"]
+            sell_amount = st.number_input("売却株数", min_value=1, max_value=max_shares, value=max_shares)
+            if st.button("📉 売却実行", use_container_width=True):
+                px = fetch_live_close(sell_ticker)
+                if px:
+                    account, msg = demo_sell(account, sell_ticker, sell_amount, px)
+                    st.success(f"{sell_ticker} を {sell_amount}株 売却しました。")
+                    st.rerun()
+                else:
+                    st.error("現在の株価が取得できません。")
+    else:
+        st.info("現在保有している銘柄はありません。")
+
+    # 履歴
+    with st.expander("📜 取引履歴"):
+        if account["history"]:
+            st.dataframe(pd.DataFrame(account["history"]), use_container_width=True, hide_index=True)
         else:
-            st.error(res["message"])
+            st.write("履歴はありません。")
+
+    if st.button("🔄 口座をリセット"):
+        reset_demo_account()
+        st.rerun()
 
 
 def render_knowledge(ticker: str = "", metrics: dict = None, ohlcv: pd.DataFrame = None) -> None:
