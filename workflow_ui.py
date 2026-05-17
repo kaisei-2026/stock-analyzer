@@ -214,33 +214,248 @@ def _normalize_demo_sym(ticker: str) -> str:
     return t
 
 
-def render_knowledge(ticker: str, backtest_snapshot: dict | None) -> None:
-    if backtest_snapshot:
-        if st.button("直近バックテストを知見に保存", key="save_bt_knowledge"):
-            body = "\n".join(f"{k}: {v}" for k, v in backtest_snapshot.items())
-            add_knowledge(
-                title=f"BT {ticker} {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-                body=body,
-                tags="backtest",
-                ticker=ticker,
-                source="自動",
-            )
-            st.success("保存しました。")
-    with st.form("knowledge_form"):
-        title = st.text_input("タイトル")
-        body = st.text_area("メモ")
-        tags = st.text_input("タグ")
-        tk = st.text_input("銘柄", value=ticker)
-        if st.form_submit_button("保存", type="primary"):
-            if title.strip() and body.strip():
-                add_knowledge(title.strip(), body.strip(), tags.strip(), tk.strip())
+def render_knowledge(ticker: str, backtest_snapshot: dict | None, ohlcv: pd.DataFrame | None = None) -> None:
+    from pattern_learner import detect_market_phase, generate_auto_knowledge, scan_patterns
+
+    k_tab_ai, k_tab_pattern, k_tab_phase, k_tab_manual, k_tab_list = st.tabs([
+        "🤖 AI自動学習", "🔍 パターン検索", "📊 フェーズ分析", "✏️ 手動メモ", "📚 知見一覧"
+    ])
+
+    # -----------------------------------------------------------------------
+    # AI自動学習タブ
+    # -----------------------------------------------------------------------
+    with k_tab_ai:
+        st.markdown("### AI が過去データから自動で知見を生成します")
+        st.write(
+            "ボタンを押すと：\n"
+            "- 現在のチャートと似た過去パターンを検索\n"
+            "- 相場フェーズを判定\n"
+            "- RSI水準別・出来高急増後・月別のリターン統計\n"
+            "をすべて自動で **知見一覧に保存** します。"
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            ai_window  = st.select_slider("パターン比較期間", options=[5, 7, 10, 14, 20], value=10, key="k_window")
+        with col2:
+            ai_horizon = st.select_slider("何日後を見る", options=[3, 5, 7, 10, 14], value=5, key="k_horizon")
+
+        if st.button("🤖 AIに自動学習させる", type="primary", key="run_auto_learn"):
+            if ohlcv is None or ohlcv.empty:
+                st.error("チャートデータがありません。先に「② 分析」タブを開いてください。")
+            else:
+                with st.spinner("AIが過去データを学習中…少し待ってね🔍"):
+                    items = generate_auto_knowledge(ticker, ohlcv, window=ai_window, horizon=ai_horizon)
+
+                if not items:
+                    st.warning("十分なデータがなく知見を生成できませんでした。期間を長くしてみてください。")
+                else:
+                    for item in items:
+                        add_knowledge(**item)
+                    st.success(f"✅ {len(items)}件の知見を自動保存しました！「知見一覧」タブで確認できます。")
+                    st.rerun()
+
+        # バックテスト結果も保存
+        if backtest_snapshot:
+            if st.button("バックテスト結果も保存", key="save_bt_knowledge"):
+                body = "\n".join(f"{k}: {v}" for k, v in backtest_snapshot.items())
+                add_knowledge(
+                    title=f"BT {ticker} {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+                    body=body,
+                    tags="backtest",
+                    ticker=ticker,
+                    source="自動",
+                )
                 st.success("保存しました。")
+
+    # -----------------------------------------------------------------------
+    # パターン検索タブ
+    # -----------------------------------------------------------------------
+    with k_tab_pattern:
+        st.markdown("### 現在の形と似た過去パターンを検索")
+        st.write("今のチャートの形と似ていた過去の場面を探し、その後どうなったかを統計で表示します。")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            p_window = st.select_slider("形の長さ（日）", options=[5, 7, 10, 14, 20], value=10, key="p_window")
+        with c2:
+            p_horizon = st.select_slider("何日後を見る", options=[3, 5, 7, 10, 14], value=5, key="p_horizon")
+        with c3:
+            p_thresh = st.slider("類似度の閾値", 0.5, 0.95, 0.75, 0.05, key="p_thresh",
+                                 help="高いほど「そっくりな形」だけを探す")
+
+        if st.button("🔍 パターンを検索", type="primary", key="run_pattern"):
+            if ohlcv is None or ohlcv.empty:
+                st.error("データがありません。")
+            else:
+                with st.spinner("過去データをスキャン中…"):
+                    result = scan_patterns(ohlcv, window=p_window, horizon=p_horizon,
+                                          similarity_threshold=p_thresh)
+
+                if not result["ok"]:
+                    st.error(result.get("error", "スキャン失敗"))
+                elif result["total_matches"] == 0:
+                    st.warning(result.get("note", "類似パターンが見つかりませんでした。閾値を下げてみてください。"))
+                else:
+                    n       = result["total_matches"]
+                    win     = result["win_rate_pct"]
+                    avg     = result["avg_return_pct"]
+                    med     = result["median_return_pct"]
+                    up      = result["up_count"]
+                    down    = result["down_count"]
+                    max_g   = result["max_gain_pct"]
+                    max_l   = result["max_loss_pct"]
+
+                    # 判定バナー
+                    if win >= 65:
+                        st.success(f"📈 **上昇優勢** — 過去{n}回中{up}回上昇（勝率 **{win:.1f}%**）")
+                    elif win <= 35:
+                        st.error(f"📉 **下落優勢** — 過去{n}回中{down}回下落（下落率 **{100-win:.1f}%**）")
+                    else:
+                        st.info(f"➡ **方向感なし** — 過去{n}回 上昇{up}回 / 下落{down}回（勝率{win:.1f}%）")
+
+                    # 数値メトリクス
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    m1.metric("類似パターン数", f"{n}回")
+                    m2.metric(f"勝率（{p_horizon}日後↑）", f"{win:.1f}%")
+                    m3.metric("平均リターン", f"{avg:+.2f}%")
+                    m4.metric("最大上昇", f"{max_g:+.2f}%")
+                    m5.metric("最大下落", f"{max_l:+.2f}%")
+
+                    # リターン分布棒グラフ
+                    if result.get("distribution"):
+                        dist = result["distribution"]
+                        fig = go.Figure(go.Bar(
+                            x=[d["range"] for d in dist],
+                            y=[d["count"] for d in dist],
+                            marker_color=["#15803d" if "+" in d["range"] or d["range"].startswith("0") else "#b91c1c"
+                                          for d in dist],
+                            text=[str(d["count"]) for d in dist],
+                            textposition="outside",
+                        ))
+                        fig.update_layout(
+                            title=f"{p_horizon}日後リターンの分布",
+                            height=280,
+                            xaxis_title="リターン範囲",
+                            yaxis_title="回数",
+                            paper_bgcolor="#ffffff",
+                            plot_bgcolor="#f8fafc",
+                            margin=dict(t=40, b=20),
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    # 類似パターン一覧
+                    with st.expander("類似パターン詳細一覧"):
+                        df_m = pd.DataFrame(result["matches"])
+                        st.dataframe(df_m, use_container_width=True, hide_index=True)
+
+    # -----------------------------------------------------------------------
+    # フェーズ分析タブ
+    # -----------------------------------------------------------------------
+    with k_tab_phase:
+        st.markdown("### 現在の相場フェーズを分析")
+        st.write("移動平均の並び順から現在のトレンド状態を判定し、過去の同じフェーズでの成績を表示します。")
+
+        if st.button("📊 フェーズを分析", type="primary", key="run_phase"):
+            if ohlcv is None or ohlcv.empty:
+                st.error("データがありません。")
+            else:
+                with st.spinner("フェーズを判定中…"):
+                    result = detect_market_phase(ohlcv)
+
+                if not result["ok"]:
+                    st.error(result.get("error"))
+                else:
+                    st.markdown(f"## {result['phase']}")
+                    st.info(result["description"])
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("SMA5", f"{result['sma5']:,.1f}")
+                    c2.metric("SMA20", f"{result['sma20']:,.1f}")
+                    c3.metric("SMA60", f"{result['sma60']:,.1f}")
+                    c4.metric("直近5日", f"{result['ret5d']:+.1f}%")
+
+                    ps = result.get("phase_stats", {})
+                    if ps:
+                        st.markdown("**過去に同じフェーズだったときの成績**")
+                        p1, p2, p3 = st.columns(3)
+                        p1.metric("サンプル数", f"{ps['sample_count']}回")
+                        p2.metric(f"勝率（{ps['horizon_days']}日後↑）", f"{ps['win_rate_pct']:.1f}%")
+                        p3.metric("平均リターン", f"{ps['avg_return_pct']:+.2f}%")
+
+                    # SMA推移チャート
+                    sma5_s  = ohlcv["Close"].rolling(5).mean().tail(120)
+                    sma20_s = ohlcv["Close"].rolling(20).mean().tail(120)
+                    sma60_s = ohlcv["Close"].rolling(60).mean().tail(120)
+                    price_s = ohlcv["Close"].tail(120)
+
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=price_s.index, y=price_s, name="終値",
+                                             line=dict(color="#0369a1", width=2)))
+                    fig.add_trace(go.Scatter(x=sma5_s.index, y=sma5_s, name="SMA5",
+                                             line=dict(color="#f59e0b", width=1.5, dash="dot")))
+                    fig.add_trace(go.Scatter(x=sma20_s.index, y=sma20_s, name="SMA20",
+                                             line=dict(color="#15803d", width=1.5)))
+                    fig.add_trace(go.Scatter(x=sma60_s.index, y=sma60_s, name="SMA60",
+                                             line=dict(color="#b91c1c", width=1.5, dash="dash")))
+                    fig.update_layout(
+                        title="移動平均の推移（直近120日）",
+                        height=320,
+                        paper_bgcolor="#ffffff",
+                        plot_bgcolor="#f8fafc",
+                        margin=dict(t=40, b=20),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+    # -----------------------------------------------------------------------
+    # 手動メモタブ
+    # -----------------------------------------------------------------------
+    with k_tab_manual:
+        st.markdown("### 自分で気づいたことをメモ")
+        with st.form("knowledge_form"):
+            title = st.text_input("タイトル")
+            body  = st.text_area("メモ内容")
+            tags  = st.text_input("タグ（カンマ区切り）")
+            tk    = st.text_input("銘柄", value=ticker)
+            if st.form_submit_button("保存", type="primary"):
+                if title.strip() and body.strip():
+                    add_knowledge(title.strip(), body.strip(), tags.strip(), tk.strip())
+                    st.success("保存しました。")
+                    st.rerun()
+                else:
+                    st.warning("タイトルとメモは必須です。")
+
+    # -----------------------------------------------------------------------
+    # 知見一覧タブ
+    # -----------------------------------------------------------------------
+    with k_tab_list:
+        st.markdown("### 蓄積された知見一覧")
+        entries = list_knowledge()
+        if entries:
+            # フィルター
+            sources = list({e.get("source", "—") for e in entries})
+            selected_source = st.selectbox("ソースで絞り込み", ["すべて"] + sources, key="k_filter")
+            filtered = entries if selected_source == "すべて" else [
+                e for e in entries if e.get("source") == selected_source
+            ]
+
+            st.caption(f"{len(filtered)} 件表示中")
+            st.dataframe(pd.DataFrame(filtered), use_container_width=True, hide_index=True)
+
+            # 詳細表示
+            with st.expander("内容を詳しく見る"):
+                for entry in filtered[:10]:
+                    st.markdown(f"**{entry.get('title','—')}** `{entry.get('created','')}`")
+                    st.text(entry.get("body", ""))
+                    st.markdown("---")
+
+            # 削除
+            del_id = st.text_input("削除する ID", key="del_k_id")
+            if st.button("削除", key="del_k_btn") and del_id.strip():
+                delete_knowledge(del_id.strip())
                 st.rerun()
-    entries = list_knowledge()
-    if entries:
-        st.dataframe(pd.DataFrame(entries), use_container_width=True, hide_index=True)
-    else:
-        st.info("知見がまだありません。")
+        else:
+            st.info("まだ知見がありません。「AI自動学習」タブでAIに学習させてみましょう！")
 
 
 def render_backtest_section(

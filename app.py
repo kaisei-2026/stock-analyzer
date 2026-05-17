@@ -484,6 +484,7 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
                 state_df = run_channel_state_machine(ohlcv, channel_period)
                 bt = run_breakout_backtest(ohlcv, channel_period, horizon_days)
                 sim_ohlcv = load_sim_ohlcv(ticker, sim_label)
+                st.session_state["current_ohlcv"] = ohlcv
                 render_analysis_tab(
                     ticker=ticker,
                     jp_note=jp_note,
@@ -514,7 +515,11 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
         )
 
     with tab_knowledge:
-        render_knowledge(ticker, st.session_state.get("last_backtest_metrics"))
+        # ohlcv をセッションに保持して知見タブに渡す
+        if "current_ohlcv" not in st.session_state:
+            st.session_state["current_ohlcv"] = None
+        render_knowledge(ticker, st.session_state.get("last_backtest_metrics"),
+                         ohlcv=st.session_state.get("current_ohlcv"))
 
     with tab_data:
         try:
