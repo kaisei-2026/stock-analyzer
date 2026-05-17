@@ -231,7 +231,9 @@ def render_backtest_section(
         if not plot_df.empty:
             st.plotly_chart(build_equity_chart(plot_df, ticker, sim_label), use_container_width=True)
 
-    t1, t2 = st.tabs([f"検証用 {backtest_cash:,.0f} 円", f"運用想定 {planning_cash:,.0f} 円"])
+    hist_label = f"過去検証（{backtest_cash/10000:,.0f}万円）" if backtest_cash >= 10_000 else f"過去検証（{backtest_cash:,.0f} 円）"
+    plan_label = f"運用想定（{planning_cash/10000:,.0f}万円）"
+    t1, t2 = st.tabs([hist_label, plan_label])
     with t1:
         panel(port_hist, "hist")
     with t2:

@@ -13,7 +13,6 @@ import yfinance as yf
 
 from backtest_engine import normalize_ohlcv
 from recommendations import (
-    DEFAULT_BACKTEST_CASH,
     DEFAULT_PLANNING_CASH,
     LOT_SIZE,
     PICKS_FOR_SMALL_CAPITAL,
@@ -453,15 +452,14 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
         sim_label = st.radio("バックテスト期間", SIMULATION_OPTIONS, index=0)
 
         st.markdown("**資金の使い分け**")
-        backtest_cash = st.number_input(
-            "過去バックテスト（検証用・円）",
-            min_value=100,
-            max_value=10_000_000,
-            value=DEFAULT_BACKTEST_CASH,
-            step=100,
-            format="%d",
-            help="成績比較用。1,000円など小さくても%は同じ目安になります。",
+        backtest_preset = st.radio(
+            "過去バックテストの想定資金",
+            ("100万円", "1000万円"),
+            index=0,
+            help="過去データでの成績検証用。リターン%の比較が主目的です。",
         )
+        backtest_cash = 10_000_000 if backtest_preset == "1000万円" else 1_000_000
+        st.caption(f"検証用初期資金: **{backtest_cash:,} 円**")
         planning_cash = st.number_input(
             "これから投資する想定（円）",
             min_value=10_000,

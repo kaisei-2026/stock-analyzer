@@ -7,7 +7,8 @@ from dataclasses import dataclass
 # 日本株は通常 100株単位。終値×100 がおおよその「1単元」必要資金。
 LOT_SIZE = 100
 DEFAULT_PLANNING_CASH = 100_000
-DEFAULT_BACKTEST_CASH = 1_000  # 過去検証の見やすい基準額
+DEFAULT_BACKTEST_CASH = 1_000_000  # 過去検証（100万円）
+BACKTEST_CASH_PRESETS = (1_000_000, 10_000_000)  # 100万 / 1000万
 
 # 流動性・知名度を重視した候補（株価は変動するためアプリ側で再計算）
 @dataclass(frozen=True)
