@@ -63,6 +63,15 @@ def render_ai_agent_dashboard() -> None:
         else:
             st.info("監視銘柄がまだ登録されていません。")
 
+    # 自動リロード機能（カウントダウンが0になったらリロード）
+    if "last_run_time" not in st.session_state:
+        st.session_state.last_run_time = agent_stats.get('last_run')
+
+    # 状態が変わっていたらリロード
+    if st.session_state.last_run_time != agent_stats.get('last_run'):
+        st.session_state.last_run_time = agent_stats.get('last_run')
+        st.rerun()
+
     # メインエリア
     col1, col2 = st.columns([1, 1])
     
@@ -137,6 +146,8 @@ def render_ai_agent_dashboard() -> None:
                                 el.style.backgroundColor = '#e8f5e9';
                                 el.style.borderColor = '#4caf50';
                                 el.style.color = '#1b5e20';
+                                // 実行準備完了から少し待ってリロード（バックグラウンド実行を待つ）
+                                setTimeout(() => {{ window.location.reload(); }}, 5000);
                             }}
                         }};
                         update();

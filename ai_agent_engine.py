@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from data_store import load_ai_agent, save_ai_agent, reset_ai_agent, add_knowledge, get_watch_tickers_list
 from ai_predictor import run_all_predictions
 from market_data import fetch_live_close
+from prediction_manager import record_prediction
 
 def run_ai_agent_cycle(force_run: bool = False) -> dict:
     """AIエージェントの1サイクル（発掘・分析・売買）を実行する
@@ -60,8 +61,12 @@ def run_ai_agent_cycle(force_run: bool = False) -> dict:
             ohlcv.columns = ohlcv.columns.droplevel(1)
             
             results = run_all_predictions(ohlcv)
+            # 予測結果を学習データとして記録
+            results["direction"]["current_price"] = fetch_live_close(ticker) # 記録用に価格をセット
+            record_prediction(ticker, results)
+            
             buy_score = results["buy_score"]["score"]
-            current_price = fetch_live_close(ticker)
+            current_price = results["direction"]["current_price"]
             
             # 3. 売買判断
             # スコア80以上なら強い購入検討
