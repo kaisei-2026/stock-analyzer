@@ -31,6 +31,10 @@ PERIOD_CONFIG: dict[str, dict[str, int | str]] = {
 
 JP_TICKER_PATTERN = re.compile(r"^\d{4}$")
 
+SIMULATION_OPTIONS = ("1年", "2年")
+SIMULATION_FETCH = {"1年": "1y", "2年": "2y"}
+SIMULATION_TRADING_DAYS = {"1年": 252, "2年": 504}
+
 
 # ---------------------------------------------------------------------------
 # データ処理
@@ -149,6 +153,93 @@ def run_backtest(close: pd.Series, sma_window: int, horizon_days: int) -> dict:
     }
 
 
+def trim_trading_days(close: pd.Series, trading_days: int) -> pd.Series:
+    """直近 N 営業日分に切り詰める。"""
+    return close.tail(min(trading_days, len(close)))
+
+
+def simulate_portfolio(
+    close: pd.Series,
+    sma_window: int,
+    initial_capital: float,
+) -> dict:
+    """
+    SMA シグナルに従ったロングオンリー・バックテスト。
+
+    ルール（前日終値で判定、当日の騰落を反映）:
+      - 前日終値 > SMA → 当日は株式を保有（日次リターンを享受）
+      - 前日終値 ≤ SMA → 当日は現金（リターン 0）
+    取引コスト・税金・スリッページは含みません。
+    """
+    sma = compute_sma(close, sma_window)
+    df = pd.DataFrame({"close": close, "sma": sma}).dropna()
+    if len(df) < 2:
+        return {"ok": False}
+
+    df["signal"] = df["close"] > df["sma"]
+    df["position"] = df["signal"].shift(1).eq(True).astype(float)
+    df["daily_ret"] = df["close"].pct_change()
+    df["strategy_ret"] = df["position"] * df["daily_ret"]
+    df.loc[df.index[0], "strategy_ret"] = 0.0
+
+    df["equity"] = initial_capital * (1 + df["strategy_ret"]).cumprod()
+    first_close = float(df["close"].iloc[0])
+    df["buy_hold_equity"] = initial_capital * (df["close"] / first_close)
+
+    final_strategy = float(df["equity"].iloc[-1])
+    final_buy_hold = float(df["buy_hold_equity"].iloc[-1])
+    peak = df["equity"].cummax()
+    max_drawdown_pct = float(((df["equity"] - peak) / peak).min() * 100)
+    trades = int((df["position"].diff().fillna(0).abs() > 0).sum())
+    in_market_pct = float(df["position"].mean() * 100)
+
+    return {
+        "ok": True,
+        "df": df,
+        "initial_capital": initial_capital,
+        "final_strategy": final_strategy,
+        "final_buy_hold": final_buy_hold,
+        "pnl_strategy": final_strategy - initial_capital,
+        "pnl_buy_hold": final_buy_hold - initial_capital,
+        "return_strategy_pct": (final_strategy / initial_capital - 1) * 100,
+        "return_buy_hold_pct": (final_buy_hold / initial_capital - 1) * 100,
+        "max_drawdown_pct": max_drawdown_pct,
+        "trades": trades,
+        "in_market_pct": in_market_pct,
+        "start_date": df.index[0],
+        "end_date": df.index[-1],
+    }
+
+
+def build_equity_chart(df: pd.DataFrame, ticker: str, sim_label: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["equity"],
+            name="シグナル運用（総資産）",
+            line=dict(color="#059669", width=2),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["buy_hold_equity"],
+            name="買い持ち（比較）",
+            line=dict(color="#6b7280", width=2, dash="dash"),
+        )
+    )
+    fig.update_layout(
+        title=f"{ticker} — 過去{sim_label}の総資産シミュレーション",
+        xaxis_title="日付",
+        yaxis_title="総資産",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+    return fig
+
+
 def build_chart(
     close: pd.Series,
     sma: pd.Series,
@@ -210,10 +301,19 @@ def main() -> None:
             help="例: AAPL（米国株）、7203 または 7203.T（日本株・4桁は自動で .T 付与）",
         )
         period_label = st.radio("分析期間", PERIOD_OPTIONS, index=2)
+        sim_label = st.radio("総資産シミュレーション", SIMULATION_OPTIONS, index=0)
+        initial_capital = st.number_input(
+            "初期資金（円）",
+            min_value=10_000,
+            max_value=1_000_000_000,
+            value=1_000_000,
+            step=100_000,
+            format="%d",
+        )
         st.markdown("---")
         st.markdown(
             f"**データ源**\n\n{DATA_SOURCE}\n\n"
-            "予測は「終値が移動平均より上か下か」の過去パターンから算出します。"
+            "予測・シミュレーションは「終値が移動平均より上か下か」のルールに基づきます。"
         )
 
     ticker = normalize_ticker(ticker_input)
@@ -318,6 +418,60 @@ def main() -> None:
         st.caption(
             f"現在のシグナルに該当する過去パターンから上昇確率を表示しています。"
             f" 全サンプル数: {backtest['sample_size']} 件（重複なしの営業日ベース）。"
+        )
+
+    # --- 総資産シミュレーション（1年 / 2年） ---
+    st.subheader(f"総資産シミュレーション（過去{sim_label}）")
+    st.markdown(
+        f"**初期資金 {initial_capital:,.0f} 円** で、SMA（{sma_window} 日）シグナルに従い取引した場合の総資産推移です。"
+        " 終値 > SMA の翌営業日から保有、終値 ≤ SMA の翌営業日から現金化（ロングオンリー）。"
+        " 手数料・税金は未考慮です。"
+    )
+
+    sim_fetch = SIMULATION_FETCH[sim_label]
+    sim_days = SIMULATION_TRADING_DAYS[sim_label]
+
+    try:
+        sim_raw = fetch_price_history(ticker, sim_fetch)
+        sim_close = trim_trading_days(extract_close(sim_raw), sim_days)
+        portfolio = simulate_portfolio(sim_close, sma_window, float(initial_capital))
+    except Exception as exc:
+        st.error(f"シミュレーションの計算に失敗しました: {exc}")
+        portfolio = {"ok": False}
+
+    if not portfolio.get("ok"):
+        st.warning("シミュレーションに必要なデータが不足しています。")
+    else:
+        sim_df = portfolio["df"]
+        start_s = portfolio["start_date"].strftime("%Y-%m-%d") if hasattr(portfolio["start_date"], "strftime") else str(portfolio["start_date"])[:10]
+        end_s = portfolio["end_date"].strftime("%Y-%m-%d") if hasattr(portfolio["end_date"], "strftime") else str(portfolio["end_date"])[:10]
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric(
+            f"シグナル運用後の総資産（{sim_label}）",
+            f"{portfolio['final_strategy']:,.0f} 円",
+            f"{portfolio['pnl_strategy']:+,.0f} 円",
+        )
+        s2.metric("リターン（シグナル運用）", f"{portfolio['return_strategy_pct']:+.2f}%")
+        s3.metric(
+            "買い持ち後の総資産（比較）",
+            f"{portfolio['final_buy_hold']:,.0f} 円",
+            f"{portfolio['pnl_buy_hold']:+,.0f} 円",
+        )
+        s4.metric("リターン（買い持ち）", f"{portfolio['return_buy_hold_pct']:+.2f}%")
+
+        diff = portfolio["final_strategy"] - portfolio["final_buy_hold"]
+        st.caption(
+            f"期間: {start_s} 〜 {end_s} ／ "
+            f"売買回数（ポジション切替）: {portfolio['trades']} 回 ／ "
+            f"株式保有率: {portfolio['in_market_pct']:.1f}% ／ "
+            f"最大ドローダウン（シグナル運用）: {portfolio['max_drawdown_pct']:.2f}% ／ "
+            f"買い持ちとの差額: {diff:+,.0f} 円"
+        )
+
+        st.plotly_chart(
+            build_equity_chart(sim_df, ticker, sim_label),
+            use_container_width=True,
         )
 
     # --- データ透明性 ---
