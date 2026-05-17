@@ -279,7 +279,7 @@ def predict_price(
 # ③ 買いスコア（0〜100点）
 # ---------------------------------------------------------------------------
 
-def compute_buy_score(ohlcv: pd.DataFrame) -> dict[str, Any]:
+def calculate_buy_score(ohlcv: pd.DataFrame) -> dict[str, Any]:
     """
     複数のテクニカル指標を組み合わせ、総合的な「買いスコア」を算出する。
 
@@ -400,7 +400,7 @@ def run_all_predictions(
     """3つの予測をまとめて返す。"""
     direction = predict_direction(ohlcv, horizon_days=direction_horizon)
     price = predict_price(ohlcv, forecast_days=price_forecast_days)
-    buy_score = compute_buy_score(ohlcv)
+    buy_score = calculate_buy_score(ohlcv)
 
     return {
         "direction": direction,
