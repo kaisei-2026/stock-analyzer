@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from ai_predictor import compute_buy_score, predict_direction, predict_price, run_all_predictions
@@ -336,8 +337,6 @@ def render_knowledge(ticker: str, backtest_snapshot: dict | None, ohlcv: pd.Data
                         fig.update_layout(
                             title=f"{p_horizon}日後リターンの分布",
                             height=280,
-                            xaxis_title="リターン範囲",
-                            yaxis_title="回数",
                             paper_bgcolor="#ffffff",
                             plot_bgcolor="#f8fafc",
                             margin=dict(t=40, b=20),
@@ -458,6 +457,326 @@ def render_knowledge(ticker: str, backtest_snapshot: dict | None, ohlcv: pd.Data
             st.info("まだ知見がありません。「AI自動学習」タブでAIに学習させてみましょう！")
 
 
+# ---------------------------------------------------------------------------
+# バックテスト UI ヘルパー
+# ---------------------------------------------------------------------------
+
+def _grade_return(pct: float) -> str:
+    """リターン値に応じた絵文字ラベルを返す。"""
+    if pct >= 20:
+        return "🟢 優秀"
+    elif pct >= 5:
+        return "🟡 良好"
+    elif pct >= 0:
+        return "⚪ 微益"
+    elif pct >= -10:
+        return "🟠 小損"
+    else:
+        return "🔴 大損"
+
+
+def _grade_sharpe(sharpe: float) -> str:
+    if sharpe >= 1.5:
+        return "🟢 優秀"
+    elif sharpe >= 1.0:
+        return "🟡 良好"
+    elif sharpe >= 0.5:
+        return "⚪ 普通"
+    else:
+        return "🔴 低い"
+
+
+def _grade_drawdown(dd: float) -> str:
+    """最大ドローダウン（負の値）に応じたラベル。"""
+    dd_abs = abs(dd)
+    if dd_abs <= 5:
+        return "🟢 小さい"
+    elif dd_abs <= 15:
+        return "🟡 普通"
+    elif dd_abs <= 30:
+        return "🟠 やや大"
+    else:
+        return "🔴 大きい"
+
+
+def _build_drawdown_chart(equity_df: pd.DataFrame) -> go.Figure | None:
+    """エクイティカーブからドローダウンチャートを生成する。"""
+    if equity_df.empty or "equity" not in equity_df.columns:
+        return None
+    eq = equity_df["equity"].dropna()
+    if eq.empty:
+        return None
+    running_max = eq.cummax()
+    drawdown = (eq - running_max) / running_max * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=drawdown.index,
+        y=drawdown.values,
+        fill="tozeroy",
+        fillcolor="rgba(185, 28, 28, 0.15)",
+        line=dict(color="#b91c1c", width=1.5),
+        name="ドローダウン",
+    ))
+    fig.update_layout(
+        title="ドローダウン推移",
+        height=220,
+        xaxis_title="日付",
+        yaxis_title="ドローダウン (%)",
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f8fafc",
+        margin=dict(t=40, b=20),
+        yaxis=dict(ticksuffix="%"),
+    )
+    return fig
+
+
+def _build_monthly_returns_chart(equity_df: pd.DataFrame) -> go.Figure | None:
+    """月次リターンのヒートマップ/棒グラフを生成する。"""
+    if equity_df.empty or "equity" not in equity_df.columns:
+        return None
+    eq = equity_df["equity"].dropna()
+    if len(eq) < 20:
+        return None
+
+    # 月末の値を取得して月次リターンを計算
+    monthly = eq.resample("ME").last()
+    if len(monthly) < 2:
+        return None
+    monthly_ret = monthly.pct_change().dropna() * 100
+
+    colors = ["#15803d" if r >= 0 else "#b91c1c" for r in monthly_ret.values]
+    labels = [f"{r:+.1f}%" for r in monthly_ret.values]
+
+    fig = go.Figure(go.Bar(
+        x=[d.strftime("%Y-%m") for d in monthly_ret.index],
+        y=monthly_ret.values,
+        marker_color=colors,
+        text=labels,
+        textposition="outside",
+        name="月次リターン",
+    ))
+    fig.update_layout(
+        title="月次リターン",
+        height=260,
+        xaxis_title="年月",
+        yaxis_title="リターン (%)",
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f8fafc",
+        margin=dict(t=40, b=20),
+        yaxis=dict(ticksuffix="%"),
+    )
+    return fig
+
+
+def _render_trades_table(trades_df: pd.DataFrame) -> None:
+    """取引履歴テーブルを整形して表示する。"""
+    if trades_df is None or trades_df.empty:
+        st.info("取引履歴がありません（シグナルが発生しなかった可能性があります）。")
+        return
+
+    display_cols_map = {
+        "EntryTime": "エントリー日",
+        "ExitTime": "イグジット日",
+        "EntryPrice": "買値",
+        "ExitPrice": "売値",
+        "PnL": "損益",
+        "ReturnPct": "リターン%",
+        "Duration": "保有期間",
+    }
+
+    df = trades_df.copy()
+    # 列名を日本語に変換
+    rename = {k: v for k, v in display_cols_map.items() if k in df.columns}
+    df = df.rename(columns=rename)
+
+    # 日時フォーマット（YYYY/MM/DD形式に整形）
+    for col in ["エントリー日", "イグジット日"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col]).dt.strftime("%Y/%m/%d")
+
+    # 数値フォーマット
+    for col in ["買値", "売値"]:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "—")
+    if "損益" in df.columns:
+        df["損益"] = df["損益"].apply(lambda x: f"{x:+,.0f}" if pd.notna(x) else "—")
+    if "リターン%" in df.columns:
+        # backtesting.py の ReturnPct は小数（0.386 = 38.6%）なので100倍して表示
+        df["リターン%"] = df["リターン%"].apply(lambda x: f"{x * 100:+.2f}%" if pd.notna(x) else "—")
+
+    # 表示列を選択
+    show_cols = [v for v in display_cols_map.values() if v in df.columns]
+    st.dataframe(df[show_cols] if show_cols else df, use_container_width=True, hide_index=True)
+
+
+def _render_backtest_panel(
+    port: dict,
+    ticker: str,
+    sim_label: str,
+    build_equity_chart,
+    cash_label: str,
+    unit_yen: float | None = None,
+) -> dict | None:
+    """バックテスト結果の1パネル（過去検証 or 運用想定）を描画する。"""
+    if not port.get("ok"):
+        st.warning(port.get("error", "データ不足またはバックテスト失敗"))
+        return None
+
+    metrics = port.get("metrics", {})
+    ret_pct = port["return_strategy_pct"]
+    bh_pct = port["return_buy_hold_pct"]
+    dd_pct = port["max_drawdown_pct"]
+    sharpe = port["sharpe"]
+    win_rate = port["win_rate_pct"]
+    num_trades = port["num_trades"]
+    profit_factor = port["profit_factor"]
+    initial = port["initial_capital"]
+    final = port["final_strategy"]
+    final_bh = port["final_buy_hold"]
+
+    # ---------------------------------------------------------------
+    # サマリーバナー
+    # ---------------------------------------------------------------
+    alpha = ret_pct - bh_pct
+    if alpha > 5:
+        banner_color = "success"
+        banner_text = f"📈 戦略が買い持ちを **{alpha:+.1f}%** 上回りました"
+    elif alpha > 0:
+        banner_color = "info"
+        banner_text = f"📊 戦略が買い持ちをわずかに上回りました（+{alpha:.1f}%）"
+    elif alpha > -5:
+        banner_color = "warning"
+        banner_text = f"📉 買い持ちが戦略を **{abs(alpha):.1f}%** 上回りました"
+    else:
+        banner_color = "error"
+        banner_text = f"⚠️ 買い持ちが戦略を大きく上回りました（{alpha:.1f}%）"
+
+    getattr(st, banner_color)(banner_text)
+
+    # ---------------------------------------------------------------
+    # メインメトリクス（2行）
+    # ---------------------------------------------------------------
+    st.markdown("#### 運用成績サマリー")
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    r1c1.metric(
+        "最終資産",
+        f"{final:,.0f} 円",
+        delta=f"{final - initial:+,.0f} 円",
+    )
+    r1c2.metric(
+        "戦略リターン",
+        f"{ret_pct:+.2f}%",
+        delta=f"vs 買い持ち {alpha:+.1f}%",
+        delta_color="normal",
+    )
+    r1c3.metric(
+        "最大ドローダウン",
+        f"{dd_pct:.2f}%",
+        help="ピークから谷までの最大下落率。小さいほど安全。",
+    )
+    r1c4.metric(
+        "シャープレシオ",
+        f"{sharpe:.2f}",
+        help="リターン÷リスク。1.0以上が目安。",
+    )
+
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+    r2c1.metric("勝率", f"{win_rate:.1f}%", help="利益トレードの割合。")
+    r2c2.metric("総取引数", f"{num_trades} 回")
+    r2c3.metric(
+        "プロフィットファクター",
+        f"{profit_factor:.2f}" if profit_factor > 0 else "—",
+        help="総利益÷総損失。1.0以上で黒字。",
+    )
+    r2c4.metric(
+        "買い持ちリターン",
+        f"{bh_pct:+.2f}%",
+        help="同期間に買い持ちした場合のリターン。",
+    )
+
+    # ---------------------------------------------------------------
+    # 評価グレード表
+    # ---------------------------------------------------------------
+    with st.expander("📋 各指標の評価", expanded=False):
+        grade_data = [
+            {"指標": "戦略リターン", "値": f"{ret_pct:+.2f}%", "評価": _grade_return(ret_pct)},
+            {"指標": "最大ドローダウン", "値": f"{dd_pct:.2f}%", "評価": _grade_drawdown(dd_pct)},
+            {"指標": "シャープレシオ", "値": f"{sharpe:.2f}", "評価": _grade_sharpe(sharpe)},
+            {"指標": "勝率", "値": f"{win_rate:.1f}%", "評価": "🟢 高い" if win_rate >= 55 else ("🟡 普通" if win_rate >= 45 else "🔴 低い")},
+            {"指標": "プロフィットファクター", "値": f"{profit_factor:.2f}" if profit_factor > 0 else "—",
+             "評価": "🟢 優秀" if profit_factor >= 2 else ("🟡 良好" if profit_factor >= 1.5 else ("⚪ 普通" if profit_factor >= 1 else "🔴 要改善"))},
+        ]
+        # 追加統計
+        if "Exposure Time [%]" in metrics:
+            exp_time = float(metrics["Exposure Time [%]"])
+            grade_data.append({"指標": "エクスポジション時間", "値": f"{exp_time:.1f}%", "評価": "市場に入っている割合"})
+        if "Expectancy [%]" in metrics:
+            exp_val = float(metrics["Expectancy [%]"])
+            grade_data.append({"指標": "期待値", "値": f"{exp_val:+.2f}%", "評価": "🟢 プラス" if exp_val > 0 else "🔴 マイナス"})
+        if "Sortino Ratio" in metrics and metrics["Sortino Ratio"]:
+            sortino = float(metrics["Sortino Ratio"])
+            grade_data.append({"指標": "ソルティノレシオ", "値": f"{sortino:.2f}", "評価": "下方リスク調整後リターン"})
+
+        st.dataframe(pd.DataFrame(grade_data), use_container_width=True, hide_index=True)
+
+    # ---------------------------------------------------------------
+    # エクイティカーブ（戦略 vs 買い持ち）
+    # ---------------------------------------------------------------
+    plot_df = equity_curve_for_plot(port)
+    if not plot_df.empty:
+        st.markdown("#### 資産推移チャート（戦略 vs 買い持ち）")
+        st.plotly_chart(build_equity_chart(plot_df, ticker, sim_label), use_container_width=True)
+
+        # ドローダウンチャート
+        dd_fig = _build_drawdown_chart(plot_df)
+        if dd_fig:
+            st.plotly_chart(dd_fig, use_container_width=True)
+
+        # 月次リターン棒グラフ
+        monthly_fig = _build_monthly_returns_chart(plot_df)
+        if monthly_fig:
+            st.plotly_chart(monthly_fig, use_container_width=True)
+
+    # ---------------------------------------------------------------
+    # 取引履歴
+    # ---------------------------------------------------------------
+    trades_df = port.get("trades")
+    if trades_df is not None and not (isinstance(trades_df, pd.DataFrame) and trades_df.empty):
+        st.markdown("#### 取引履歴")
+        _render_trades_table(trades_df if isinstance(trades_df, pd.DataFrame) else pd.DataFrame(trades_df))
+
+        # 取引損益分布
+        if isinstance(trades_df, pd.DataFrame) and not trades_df.empty and "PnL" in trades_df.columns:
+            pnl_vals = trades_df["PnL"].dropna()
+            if len(pnl_vals) > 0:
+                with st.expander("📊 取引損益分布", expanded=False):
+                    fig_pnl = go.Figure(go.Histogram(
+                        x=pnl_vals,
+                        nbinsx=20,
+                        marker_color=[
+                            "#15803d" if v >= 0 else "#b91c1c" for v in pnl_vals
+                        ],
+                        name="損益分布",
+                    ))
+                    fig_pnl.update_layout(
+                        title="取引損益ヒストグラム",
+                        height=240,
+                        xaxis_title="損益（円）",
+                        yaxis_title="取引数",
+                        paper_bgcolor="#ffffff",
+                        plot_bgcolor="#f8fafc",
+                        margin=dict(t=40, b=20),
+                    )
+                    st.plotly_chart(fig_pnl, use_container_width=True)
+
+    # 単元コスト表示
+    if unit_yen is not None:
+        st.caption(f"1単元 ≈ {unit_yen:,.0f} 円")
+
+    return metrics
+
+
 def render_backtest_section(
     ticker: str,
     sim_label: str,
@@ -470,6 +789,28 @@ def render_backtest_section(
     build_equity_chart,
 ) -> dict | None:
     commission = float(commission_pct) / 100.0
+
+    # -----------------------------------------------------------------------
+    # 戦略概要
+    # -----------------------------------------------------------------------
+    st.markdown("### ドンチャン・チャネルブレイクアウト バックテスト")
+    with st.expander("📖 戦略の説明", expanded=False):
+        st.markdown(
+            f"""
+**戦略ロジック（ロングオンリー）**
+
+| 条件 | アクション |
+|------|-----------|
+| 終値 > 過去 {channel_period} 日の高値 | 買いエントリー |
+| 終値 < 過去 {channel_period} 日の安値 | 決済（イグジット） |
+
+- **チャネル期間:** {channel_period} 日
+- **手数料:** 片道 {commission_pct:.3f}%
+- **バックテスト期間:** {sim_label}
+- **エンジン:** [backtesting.py]({LIBRARY_DOCS})
+            """
+        )
+
     port_hist = run_backtest(
         sim_ohlcv, channel_period=channel_period, cash=float(backtest_cash), commission=commission
     )
@@ -478,33 +819,41 @@ def render_backtest_section(
     )
     snapshot = None
 
-    def panel(port: dict) -> None:
-        nonlocal snapshot
-        if not port.get("ok"):
-            st.warning(port.get("error", "データ不足"))
-            return
-        snapshot = port.get("metrics")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("最終資産", f"{port['final_strategy']:,.0f} 円")
-        c2.metric("リターン", f"{port['return_strategy_pct']:+.2f}%")
-        c3.metric("最大DD", f"{port['max_drawdown_pct']:.2f}%")
-        c4.metric("勝率", f"{port['win_rate_pct']:.1f}%")
-        plot_df = equity_curve_for_plot(port)
-        if plot_df.empty:
-            return
-        st.plotly_chart(build_equity_chart(plot_df, ticker, sim_label), use_container_width=True)
-
-    t1, t2 = st.tabs(
-        [
-            f"過去検証（{backtest_cash / 1_000_000:.0f}百万円）" if backtest_cash >= 1_000_000 else f"過去検証",
-            f"運用想定（{planning_cash / 10000:.0f}万円）",
-        ]
+    # -----------------------------------------------------------------------
+    # 2タブ: 過去検証 / 運用想定
+    # -----------------------------------------------------------------------
+    hist_label = (
+        f"📊 過去検証（{backtest_cash / 1_000_000:.0f}百万円）"
+        if backtest_cash >= 1_000_000
+        else "📊 過去検証"
     )
+    plan_label = f"💰 運用想定（{planning_cash / 10000:.0f}万円）"
+
+    t1, t2 = st.tabs([hist_label, plan_label])
+
     with t1:
-        panel(port_hist)
+        result = _render_backtest_panel(
+            port_hist,
+            ticker,
+            sim_label,
+            build_equity_chart,
+            cash_label=hist_label,
+        )
+        if result is not None:
+            snapshot = result
+
     with t2:
-        st.caption(f"1単元 ≈ {unit_yen:,.0f} 円")
-        panel(port_plan)
+        result = _render_backtest_panel(
+            port_plan,
+            ticker,
+            sim_label,
+            build_equity_chart,
+            cash_label=plan_label,
+            unit_yen=unit_yen,
+        )
+        if result is not None and snapshot is None:
+            snapshot = result
+
     return snapshot
 
 
