@@ -228,7 +228,28 @@ def render_ai_agent_dashboard() -> None:
 
     # 4. ポートフォリオ
     st.markdown("---")
-    st.markdown("#### 📊 ポートフォリオ")
+    st.markdown("#### 📊 ポートフォリオ構成")
+    
+    if agent_stats['positions']:
+        # 円グラフ用のデータ作成
+        labels = ['現金']
+        values = [agent_stats['current_cash']]
+        
+        for ticker, pos in agent_stats['positions'].items():
+            from market_data import fetch_live_close
+            current_price = fetch_live_close(ticker) or pos['entry_price']
+            labels.append(ticker)
+            values.append(current_price * pos['shares'])
+            
+        fig_pie = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.3)])
+        fig_pie.update_layout(
+            title="資産構成比",
+            height=400,
+            margin=dict(t=30, b=0, l=0, r=0)
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    
+    st.markdown("#### 📋 保有銘柄一覧")
     if agent_stats['positions']:
         pos_list = []
         for ticker, pos in agent_stats['positions'].items():
