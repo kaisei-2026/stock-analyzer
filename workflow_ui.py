@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
+from ai_predictor import compute_buy_score, predict_direction, predict_price, run_all_predictions
 from backtest_engine import LIBRARY_DOCS, LIBRARY_GITHUB, LIBRARY_NAME, equity_curve_for_plot, run_backtest
 from data_store import (
     add_idea,
@@ -290,6 +293,296 @@ def render_backtest_section(
     return snapshot
 
 
+def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame, planning_cash: float) -> None:
+    """AI予測タブの UI。方向予測・数値予測・買いスコア・おすすめ一括スキャンを表示。"""
+
+    st.caption("⚠️ AI予測は過去データの統計パターンです。将来の利益を保証しません。参考情報としてご利用ください。")
+
+    ai_tab1, ai_tab2, ai_tab3, ai_tab4 = st.tabs([
+        "📈 短期方向予測", "💹 株価数値予測", "🎯 買いスコア", "🔍 おすすめ一括スキャン"
+    ])
+
+    # -----------------------------------------------------------------------
+    # タブ1: 短期方向予測
+    # -----------------------------------------------------------------------
+    with ai_tab1:
+        st.markdown("### 短期方向予測（上がる？下がる？）")
+        st.write("機械学習（勾配ブースティング）が過去のテクニカル指標パターンを学習し、数日後の方向を予測します。")
+
+        horizon = st.select_slider(
+            "予測期間",
+            options=[3, 5, 7, 10, 14],
+            value=5,
+            format_func=lambda x: f"{x}営業日後",
+            key="direction_horizon"
+        )
+
+        if st.button("🔮 方向予測を実行", type="primary", key="run_direction"):
+            with st.spinner("AIが学習中…"):
+                result = predict_direction(ohlcv, horizon_days=horizon)
+
+            if not result["ok"]:
+                st.error(result.get("error", "予測失敗"))
+            else:
+                prob_up = result["prob_up"]
+                prob_down = result["prob_down"]
+                signal = result["signal"]
+                confidence = result["confidence"]
+
+                # メインシグナル表示
+                color = "🟢" if prob_up >= 55 else ("🔴" if prob_down >= 55 else "⚪")
+                st.markdown(f"## {color} {signal}")
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("上昇確率", f"{prob_up:.1f}%")
+                c2.metric("下落確率", f"{prob_down:.1f}%")
+                c3.metric("信頼度", confidence)
+
+                # 確率バー
+                st.markdown("**上昇 vs 下落**")
+                fig = go.Figure(go.Bar(
+                    x=["上昇", "下落"],
+                    y=[prob_up, prob_down],
+                    marker_color=["#15803d" if prob_up >= prob_down else "#94a3b8",
+                                  "#b91c1c" if prob_down > prob_up else "#94a3b8"],
+                    text=[f"{prob_up:.1f}%", f"{prob_down:.1f}%"],
+                    textposition="outside"
+                ))
+                fig.update_layout(
+                    height=280,
+                    yaxis=dict(range=[0, 100], title="確率 (%)"),
+                    margin=dict(t=20, b=20),
+                    paper_bgcolor="#ffffff",
+                    plot_bgcolor="#f8fafc",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 重要特徴量
+                if result.get("top_features"):
+                    st.markdown("**この予測に影響した指標 TOP5**")
+                    feat_df = pd.DataFrame(result["top_features"], columns=["指標", "重要度"])
+                    feat_df["重要度"] = feat_df["重要度"].map(lambda x: f"{x:.3f}")
+                    st.dataframe(feat_df, use_container_width=True, hide_index=True)
+
+                st.caption(f"学習サンプル: {result['train_samples']}日分 | {result['note']}")
+
+    # -----------------------------------------------------------------------
+    # タブ2: 株価数値予測
+    # -----------------------------------------------------------------------
+    with ai_tab2:
+        st.markdown("### 株価数値予測（何円になる？）")
+        st.write("回帰モデルが将来の株価水準を予測します。90%信頼区間も表示します。")
+
+        forecast_days = st.select_slider(
+            "予測期間",
+            options=[5, 10, 20, 40, 60],
+            value=20,
+            format_func=lambda x: f"{x}営業日後（約{x//5}週間）",
+            key="forecast_days"
+        )
+
+        if st.button("📊 株価予測を実行", type="primary", key="run_price"):
+            with st.spinner("AIが計算中…"):
+                result = predict_price(ohlcv, forecast_days=forecast_days)
+
+            if not result["ok"]:
+                st.error(result.get("error", "予測失敗"))
+            else:
+                current = result["current_price"]
+                predicted = result["predicted_price"]
+                ret_pct = result["predicted_return_pct"]
+                lower = result["lower_bound"]
+                upper = result["upper_bound"]
+                label = result["confidence_label"]
+
+                arrow = "📈" if ret_pct > 0 else "📉"
+                st.markdown(f"## {arrow} {label}")
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("現在の株価", f"{current:,.1f} 円")
+                c2.metric(
+                    f"{forecast_days}日後予測",
+                    f"{predicted:,.1f} 円",
+                    delta=f"{ret_pct:+.1f}%"
+                )
+                c3.metric("90%信頼区間", f"{lower:,.0f}〜{upper:,.0f} 円")
+
+                # 予測チャート（最近の株価 + 予測点）
+                recent = ohlcv["Close"].tail(60)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(recent))),
+                    y=recent.values,
+                    name="実際の株価",
+                    line=dict(color="#0369a1", width=2)
+                ))
+                # 予測点
+                pred_x = len(recent) + forecast_days
+                fig.add_trace(go.Scatter(
+                    x=[len(recent) - 1, pred_x],
+                    y=[float(recent.iloc[-1]), predicted],
+                    name="予測",
+                    line=dict(color="#15803d", width=2, dash="dash"),
+                    mode="lines+markers",
+                    marker=dict(size=10)
+                ))
+                # 信頼区間
+                fig.add_trace(go.Scatter(
+                    x=[pred_x, pred_x],
+                    y=[lower, upper],
+                    name="90%信頼区間",
+                    mode="markers",
+                    marker=dict(size=12, symbol="line-ns-open", color="#f59e0b", line_width=2)
+                ))
+                fig.update_layout(
+                    height=350,
+                    xaxis_title="営業日",
+                    yaxis_title="株価（円）",
+                    paper_bgcolor="#ffffff",
+                    plot_bgcolor="#f8fafc",
+                    margin=dict(t=20, b=20),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(result["note"])
+
+    # -----------------------------------------------------------------------
+    # タブ3: 買いスコア
+    # -----------------------------------------------------------------------
+    with ai_tab3:
+        st.markdown("### 総合買いスコア（今が買い時？）")
+        st.write("RSI・MACD・ボリンジャーバンド・トレンド・出来高を組み合わせた総合スコアです。")
+
+        if st.button("🎯 買いスコアを計算", type="primary", key="run_score"):
+            with st.spinner("指標を計算中…"):
+                result = compute_buy_score(ohlcv)
+
+            if not result["ok"]:
+                st.error(result.get("error", "計算失敗"))
+            else:
+                score = result["score"]
+                grade = result["grade"]
+
+                st.markdown(f"## {grade}")
+
+                # ゲージチャート
+                fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=score,
+                    number={"suffix": "点", "font": {"size": 36}},
+                    gauge={
+                        "axis": {"range": [0, 100]},
+                        "bar": {"color": "#0369a1"},
+                        "steps": [
+                            {"range": [0, 25],  "color": "#fecaca"},
+                            {"range": [25, 40], "color": "#fed7aa"},
+                            {"range": [40, 55], "color": "#fef9c3"},
+                            {"range": [55, 75], "color": "#bbf7d0"},
+                            {"range": [75, 100], "color": "#86efac"},
+                        ],
+                        "threshold": {
+                            "line": {"color": "#1d4ed8", "width": 3},
+                            "thickness": 0.75,
+                            "value": score
+                        }
+                    }
+                ))
+                fig.update_layout(
+                    height=300,
+                    margin=dict(t=20, b=0, l=20, r=20),
+                    paper_bgcolor="#ffffff",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 各指標の詳細
+                st.markdown("**各指標の判定**")
+                for sig in result["signals"]:
+                    icon = sig["icon"]
+                    name = sig["name"]
+                    detail = sig["detail"]
+                    weight = sig["weight"]
+                    st.markdown(f"{icon} **{name}** （重み{weight}点） — {detail}")
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("RSI", f"{result['rsi']:.1f}")
+                c2.metric("MACDヒスト", f"{result['macd_hist']:+.3f}")
+                c3.metric("BB位置", f"{result['bb_pos_pct']:.0f}%")
+                c4.metric("出来高比", f"{result['vol_ratio']:.2f}倍")
+
+                st.caption(result["note"])
+
+    # -----------------------------------------------------------------------
+    # タブ4: おすすめ銘柄一括スキャン
+    # -----------------------------------------------------------------------
+    with ai_tab4:
+        st.markdown("### おすすめ銘柄 AI一括スキャン")
+        st.write("固定9銘柄 ＋ 自分で追加した銘柄のAI買いスコアをまとめて確認できます。")
+
+        # 追加銘柄入力
+        extra_input = st.text_input(
+            "追加銘柄（カンマ区切り）",
+            placeholder="例: 7203, 9984, 6758",
+            key="extra_tickers"
+        )
+
+        scan_tickers = list({p.ticker for p in PICKS_FOR_SMALL_CAPITAL})
+        if extra_input.strip():
+            for t in extra_input.split(","):
+                t = t.strip()
+                if t:
+                    scan_tickers.append(t if "." in t else (f"{t}.T" if t.isdigit() else t))
+
+        if st.button("🔍 全銘柄をスキャン", type="primary", key="run_scan"):
+            results_rows = []
+            progress = st.progress(0.0)
+            status = st.empty()
+
+            for i, tk in enumerate(scan_tickers):
+                status.text(f"スキャン中: {tk} ({i+1}/{len(scan_tickers)})")
+                try:
+                    import yfinance as yf
+                    from backtest_engine import normalize_ohlcv
+                    raw = yf.download(tk, period="6mo", interval="1d", progress=False, auto_adjust=False)
+                    if raw.empty:
+                        raw = yf.Ticker(tk).history(period="6mo", auto_adjust=False)
+                    scan_ohlcv = normalize_ohlcv(raw)
+
+                    score_res = compute_buy_score(scan_ohlcv)
+                    dir_res   = predict_direction(scan_ohlcv, horizon_days=5)
+
+                    score   = score_res["score"] if score_res["ok"] else None
+                    grade   = score_res["grade"] if score_res["ok"] else "—"
+                    prob_up = dir_res["prob_up"] if dir_res["ok"] else None
+                    signal  = dir_res["signal"] if dir_res["ok"] else "—"
+                    close   = float(scan_ohlcv["Close"].iloc[-1])
+
+                    results_rows.append({
+                        "コード": tk,
+                        "終値": f"{close:,.0f}",
+                        "買いスコア": f"{score:.0f}点" if score is not None else "—",
+                        "グレード": grade,
+                        "上昇確率(5日)": f"{prob_up:.1f}%" if prob_up is not None else "—",
+                        "方向シグナル": signal,
+                    })
+                except Exception as e:
+                    results_rows.append({
+                        "コード": tk, "終値": "—",
+                        "買いスコア": "取得失敗", "グレード": str(e)[:30],
+                        "上昇確率(5日)": "—", "方向シグナル": "—",
+                    })
+
+                progress.progress((i + 1) / len(scan_tickers))
+
+            status.empty()
+            progress.empty()
+
+            if results_rows:
+                df_result = pd.DataFrame(results_rows)
+                st.dataframe(df_result, use_container_width=True, hide_index=True)
+                st.success(f"{len(results_rows)}銘柄のスキャン完了！")
+
+        st.caption("スキャンはAPIリクエストが多く発生するため、頻繁な実行は避けてください。")
+
+
 def build_recommendations_table(capital: float) -> pd.DataFrame:
     codes = tuple(p.ticker for p in PICKS_FOR_SMALL_CAPITAL)
     closes = fetch_recommendation_closes(codes)
@@ -344,8 +637,8 @@ def render_analysis_tab(
     c4.metric("下限", f"{bt.get('last_lower', 0):,.2f}")
     c5.metric("買付", "可" if unit_yen <= planning_cash else "不足")
 
-    sub_chart, sub_stats, sub_bt, sub_rec = st.tabs(
-        ["チャート", "統計", "バックテスト", "おすすめ銘柄"]
+    sub_chart, sub_stats, sub_bt, sub_ai, sub_rec = st.tabs(
+        ["チャート", "統計", "バックテスト", "🤖 AI予測", "おすすめ銘柄"]
     )
 
     with sub_chart:
@@ -378,6 +671,9 @@ def render_analysis_tab(
         )
         if metrics:
             st.session_state["last_backtest_metrics"] = metrics
+
+    with sub_ai:
+        render_ai_prediction_tab(ticker, ohlcv, planning_cash)
 
     with sub_rec:
         st.caption(f"おすすめ株価は {RECOMMENDATIONS_TTL_SEC // 60} 分キャッシュ（API 上限対策）。")
