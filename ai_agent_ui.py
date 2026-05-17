@@ -170,7 +170,9 @@ def render_ai_agent_dashboard() -> None:
     portfolio_history = agent_stats.get('portfolio_history', [])
     if portfolio_history and len(portfolio_history) > 1:
         df_history = pd.DataFrame(portfolio_history)
-        df_history['date'] = pd.to_datetime(df_history['date'])
+        # 日付形式を柔軟に処理（ISO8601対応）
+        df_history['date'] = pd.to_datetime(df_history['date'], errors='coerce')
+        df_history = df_history.dropna(subset=['date'])
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -256,7 +258,38 @@ def render_ai_agent_dashboard() -> None:
         st.dataframe(display_df[['銘柄', '保有数', '取得価格', '現在価格', '評価額', '損益']], use_container_width=True, hide_index=True)
 
         # 個別銘柄チャート
-        st.markdown("#### 🔍 個別銘柄の詳細チャート（購入時からの推移）")
+        st.markdown("#### 🔍 保有銘柄のパフォーマンス比較")
+        
+        # 複数銘柄の推移を一つのグラフに表示
+        fig_comp = go.Figure()
+        import yfinance as yf
+        
+        for _, row in pos_df.iterrows():
+            t = row['銘柄']
+            p = agent_stats['positions'][t]
+            e_date = datetime.fromisoformat(p['entry_date'])
+            # 購入日から現在までのデータを取得
+            d_comp = yf.download(t, start=e_date.strftime('%Y-%m-%d'), progress=False)
+            if not d_comp.empty:
+                d_comp.columns = d_comp.columns.droplevel(1) if isinstance(d_comp.columns, pd.MultiIndex) else d_comp.columns
+                # 取得価格を100とした指数を表示
+                normalized_price = (d_comp['Close'] / p['entry_price']) * 100
+                fig_comp.add_trace(go.Scatter(
+                    x=d_comp.index, y=normalized_price,
+                    mode='lines', name=f"{t} (取得時=100)"
+                ))
+        
+        fig_comp.add_hline(y=100, line_dash="dash", line_color="black", opacity=0.5)
+        fig_comp.update_layout(
+            title="保有銘柄の相対パフォーマンス（取得価格を100として比較）",
+            xaxis_title="日付",
+            yaxis_title="パフォーマンス (%)",
+            height=400,
+            template='plotly_white'
+        )
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+        st.markdown("#### 🔍 個別銘柄の詳細チャート")
         selected_ticker = st.selectbox("詳細を表示する銘柄を選択", options=pos_df['銘柄'].tolist())
         
         if selected_ticker:
