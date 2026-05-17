@@ -17,12 +17,10 @@ from recommendations import (
     LOT_SIZE,
     PICKS_FOR_SMALL_CAPITAL,
     REFERENCE_LINKS,
-    affordability_label,
-    unit_cost_yen,
 )
 from theme import COLORS, inject_theme, style_figure
 from workflow_ui import (
-    render_backtest_section,
+    render_analysis_tab,
     render_data_collection,
     render_demo_trade,
     render_investment_ideas,
@@ -52,15 +50,6 @@ JP_TICKER_PATTERN = re.compile(r"^\d{4}$")
 SIMULATION_OPTIONS = ("1年", "2年")
 SIMULATION_FETCH = {"1年": "1y", "2年": "2y"}
 SIMULATION_TRADING_DAYS = {"1年": 252, "2年": 504}
-
-WORKFLOW_PAGES = (
-    "② 分析＆バックテスト",
-    "① 投資アイデア",
-    "③ デモトレード",
-    "⑤ 知見の蓄積",
-    "データ収集",
-)
-
 
 # ---------------------------------------------------------------------------
 # データ
@@ -365,48 +354,10 @@ def fmt_date(idx) -> str:
     return idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_last_closes_jp(tickers: tuple[str, ...]) -> dict[str, float]:
-    """おすすめ銘柄の直近終値を取得（銘柄ごとに取得して精度を確保）。"""
-    closes: dict[str, float] = {}
-    for code in tickers:
-        sym = f"{code}.T" if not str(code).endswith(".T") else str(code)
-        try:
-            raw = yf.download(sym, period="5d", interval="1d", progress=False, auto_adjust=False)
-            if raw.empty:
-                raw = yf.Ticker(sym).history(period="5d", auto_adjust=False)
-            ohlcv = extract_ohlcv(raw)
-            if not ohlcv.empty:
-                closes[code] = float(ohlcv["Close"].iloc[-1])
-        except Exception:
-            continue
-    return closes
-
-
-def build_recommendations_table(capital: float) -> pd.DataFrame:
-    codes = tuple(p.ticker for p in PICKS_FOR_SMALL_CAPITAL)
-    closes = fetch_last_closes_jp(codes)
-    rows = []
-    for pick in PICKS_FOR_SMALL_CAPITAL:
-        close = closes.get(pick.ticker)
-        if close is None:
-            unit = None
-            label = "（株価取得失敗）"
-        else:
-            unit = unit_cost_yen(close)
-            label = affordability_label(close, capital)
-        rows.append(
-            {
-                "コード": pick.ticker,
-                "銘柄": pick.name,
-                "分類": pick.category,
-                "直近終値": f"{close:,.0f}" if close else "—",
-                f"1単元({LOT_SIZE}株)": f"{unit:,.0f}円" if unit else "—",
-                f"{capital/10000:.0f}万円での目安": label,
-                "メモ": pick.note,
-            }
-        )
-    return pd.DataFrame(rows)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sim_ohlcv(ticker: str, sim_label: str) -> pd.DataFrame:
+    raw = fetch_price_history(ticker, SIMULATION_FETCH[sim_label])
+    return trim_ohlcv(extract_ohlcv(raw), SIMULATION_TRADING_DAYS[sim_label])
 
 
 def main() -> None:
@@ -421,9 +372,7 @@ def main() -> None:
     st.caption("投資ワークフロー: アイデア → 分析 → デモトレード → 知見（本番取引は非対応）")
 
     with st.sidebar:
-        page = st.radio("ワークフロー", WORKFLOW_PAGES, index=0)
-        st.markdown("---")
-        with st.expander("🚀 起動方法", expanded=True):
+        with st.expander("起動方法", expanded=False):
             st.markdown(
                 """
 1. ターミナルでこのフォルダへ移動  
@@ -476,7 +425,14 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
             value=0.0,
             step=0.01,
             format="%.3f",
-            help="backtesting.py の commission（例: 0.1% → 0.001）",
+        )
+        st.markdown("**③ デモトレード更新**")
+        demo_auto = st.toggle("株価を自動更新", value=True)
+        demo_refresh_sec = st.select_slider(
+            "更新間隔（秒）",
+            options=[60, 90, 120, 180, 300],
+            value=60,
+            help=f"同一銘柄は {60} 秒キャッシュ。間隔を短くしすぎると yfinance 制限に当たりやすくなります。",
         )
         st.markdown("---")
         st.markdown(
@@ -504,178 +460,75 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
 
     jp_note = "（4桁 → .T 付与）" if JP_TICKER_PATTERN.fullmatch(ticker_input.strip()) else ""
 
-    with st.expander("ワークフロー対応状況", expanded=False):
-        render_workflow_checklist()
+    tab_analysis, tab_idea, tab_demo, tab_knowledge, tab_data = st.tabs(
+        [
+            "② 分析＆バックテスト",
+            "① 投資アイデア",
+            "③ デモトレード",
+            "⑤ 知見の蓄積",
+            "データ収集",
+        ]
+    )
 
-    if page != "② 分析＆バックテスト":
-        st.markdown(f"**対象銘柄:** `{ticker}` {jp_note}")
+    with tab_analysis:
+        try:
+            with st.spinner("チャート用データ取得中…"):
+                raw = fetch_price_history(ticker, fetch_period)
+                ohlcv = extract_ohlcv(raw)
+        except Exception as exc:
+            st.error(f"データ取得失敗: {exc}")
+        else:
+            if ohlcv.empty:
+                st.error(f"「{ticker}」のデータがありません。")
+            else:
+                state_df = run_channel_state_machine(ohlcv, channel_period)
+                bt = run_breakout_backtest(ohlcv, channel_period, horizon_days)
+                sim_ohlcv = load_sim_ohlcv(ticker, sim_label)
+                render_analysis_tab(
+                    ticker=ticker,
+                    jp_note=jp_note,
+                    ohlcv=ohlcv,
+                    period_label=period_label,
+                    sim_label=sim_label,
+                    channel_period=channel_period,
+                    chart_days=chart_days,
+                    planning_cash=float(planning_cash),
+                    backtest_cash=float(backtest_cash),
+                    commission_pct=float(commission_pct),
+                    state_df=state_df,
+                    bt=bt,
+                    sim_ohlcv=sim_ohlcv,
+                    build_candlestick_chart=build_candlestick_chart,
+                    build_equity_chart=build_equity_chart,
+                )
 
-    try:
-        with st.spinner("マーケットデータ取得中…"):
-            raw = fetch_price_history(ticker, fetch_period)
-            ohlcv = extract_ohlcv(raw)
-    except Exception as exc:
-        st.error(f"データ取得失敗: {exc}")
-        render_footer()
-        return
-
-    if ohlcv.empty:
-        st.error(f"「{ticker}」のデータがありません。")
-        render_footer()
-        return
-
-    if page == "データ収集":
-        render_data_collection(ticker, ohlcv, fetch_period)
-        render_footer()
-        return
-
-    if page == "① 投資アイデア":
+    with tab_idea:
         render_investment_ideas(ticker)
-        render_footer()
-        return
 
-    if page == "③ デモトレード":
-        render_demo_trade(ticker, float(ohlcv["Close"].iloc[-1]), float(planning_cash))
-        render_footer()
-        return
-
-    if page == "⑤ 知見の蓄積":
-        snap = st.session_state.get("last_backtest_metrics")
-        render_knowledge(ticker, snap)
-        render_footer()
-        return
-
-    # --- ② 分析＆バックテスト ---
-    st.markdown(f"**{ticker}** {jp_note}")
-    state_df = run_channel_state_machine(ohlcv, channel_period)
-    bt = run_breakout_backtest(ohlcv, channel_period, horizon_days)
-    latest = ohlcv.iloc[-1]
-    in_market = bool(state_df["position_eod"].iloc[-1]) if not state_df.empty else False
-
-    # --- シグナルバナー ---
-    signal_text = bt.get("current_signal") or "—"
-    pos_label = "🟢 ロング保有中" if in_market else "⚪ 現金待機"
-    st.markdown(
-        f'<div class="signal-banner">'
-        f"<strong>{pos_label}</strong> ｜ 状態: {signal_text} ｜ "
-        f"チャネル {channel_period} 日</div>",
-        unsafe_allow_html=True,
-    )
-
-    unit_yen = unit_cost_yen(float(latest["Close"]))
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("直近終値", f"{latest['Close']:,.2f}")
-    c2.metric(f"1単元({LOT_SIZE}株)", f"{unit_yen:,.0f} 円")
-    c3.metric(
-        f"{planning_cash/10000:.0f}万円で",
-        "買付可" if unit_yen <= planning_cash else "単元不足",
-    )
-    c4.metric("チャネル上限", f"{bt.get('last_upper', 0):,.2f}")
-    c5.metric("チャネル下限", f"{bt.get('last_lower', 0):,.2f}")
-    c6.metric("データ日", fmt_date(ohlcv.index[-1]))
-
-    # --- おすすめ銘柄（10万円前後） ---
-    st.subheader(f"💡 おすすめ銘柄（{planning_cash/10000:.0f}万円・1単元目安）")
-    st.caption(
-        "流動性と単元の大きさを踏まえた**候補**です。推奨売買ではありません。"
-        " 最新株価で「1単元」が資金内か確認してから検討してください。"
-    )
-    with st.spinner("おすすめ銘柄の株価を確認中…"):
-        rec_df = build_recommendations_table(float(planning_cash))
-    st.dataframe(rec_df, use_container_width=True, hide_index=True)
-    affordable = rec_df[rec_df[f"{planning_cash/10000:.0f}万円での目安"].str.startswith("✅")]
-    if not affordable.empty:
-        st.success(
-            "資金内で1単元が買える候補: "
-            + "、".join(f"{r['コード']} {r['銘柄']}" for _, r in affordable.iterrows())
-        )
-
-    # --- ローソク足チャート ---
-    st.subheader("📈 ローソク足 & チャネル")
-    st.plotly_chart(
-        build_candlestick_chart(ohlcv, channel_period, chart_days, ticker),
-        use_container_width=True,
-        config={"displayModeBar": True, "scrollZoom": True},
-    )
-
-    # --- 方向性統計 ---
-    st.subheader(f"🎯 ブレイクアウト統計（{period_label} 先）")
-    st.markdown(
-        f"過去 **{channel_period} 日**の高値・安値チャネルで、"
-        f"上抜け / 下抜け後 **{horizon_days} 営業日**の騰落率を集計。"
-    )
-
-    if bt.get("p_up") is None or bt["sample_size"] < 10:
-        st.warning("統計サンプルが不足しています。期間を長くするか別銘柄を試してください。")
-    else:
-        m1, m2, m3 = st.columns(3)
-        m1.metric(f"{period_label} 先 上昇確率", f"{bt['p_up']:.1f}%")
-        m2.metric(f"{period_label} 先 下落確率", f"{bt['p_down']:.1f}%")
-        m3.metric("現在の状態", bt["current_signal"])
-
-        st.progress(bt["p_up"] / 100.0)
-
-        r1, r2 = st.columns(2)
-        with r1:
-            st.markdown("**上抜け（ブレイクアウト）後**")
-            bo = bt.get("breakout")
-            if bo:
-                st.write(f"サンプル {bo['n']} ｜ 上昇 {bo['p_up']:.1f}% ｜ 平均 {bo['avg_return_pct']:+.2f}%")
-            else:
-                st.write("データ不足")
-        with r2:
-            st.markdown("**下抜け（ブレイクダウン）後**")
-            bd = bt.get("breakdown")
-            if bd:
-                st.write(f"サンプル {bd['n']} ｜ 上昇 {bd['p_up']:.1f}% ｜ 平均 {bd['avg_return_pct']:+.2f}%")
-            else:
-                st.write("データ不足")
-
-    try:
-        sim_raw = fetch_price_history(ticker, SIMULATION_FETCH[sim_label])
-        sim_ohlcv = trim_ohlcv(extract_ohlcv(sim_raw), SIMULATION_TRADING_DAYS[sim_label])
-        metrics = render_backtest_section(
+    with tab_demo:
+        render_demo_trade(
             ticker,
-            sim_label,
-            channel_period,
-            commission_pct,
-            backtest_cash,
-            planning_cash,
-            unit_yen,
-            sim_ohlcv,
-            build_equity_chart,
+            float(planning_cash),
+            auto_refresh=demo_auto,
+            refresh_sec=int(demo_refresh_sec),
         )
-        if metrics:
-            st.session_state["last_backtest_metrics"] = metrics
-    except Exception as exc:
-        st.error(f"バックテスト失敗: {exc}")
 
-    # --- 直近トレードログ ---
-    with st.expander("📋 直近のエントリー / イグジット", expanded=False):
-        if not state_df.empty:
-            log = state_df[state_df["entry_signal"] | state_df["exit_signal"]][
-                ["Close", "upper", "lower", "entry_signal", "exit_signal"]
-            ].tail(12)
-            log["種別"] = log.apply(
-                lambda r: "🟢 ENTRY" if r["entry_signal"] else "🔴 EXIT", axis=1
-            )
-            st.dataframe(
-                log[["種別", "Close", "upper", "lower"]].rename(
-                    columns={"Close": "終値", "upper": "上限", "lower": "下限"}
-                ),
-                use_container_width=True,
-            )
+    with tab_knowledge:
+        render_knowledge(ticker, st.session_state.get("last_backtest_metrics"))
 
-    with st.expander("🔍 データ透明性", expanded=False):
-        st.markdown(
-            f"| 項目 | 値 |\n|---|---|\n"
-            f"| ソース | {DATA_SOURCE} |\n"
-            f"| ティッカー | `{ticker}` |\n"
-            f"| チャネル期間 | {channel_period} 日（前日までの高安） |\n"
-            f"| 取得 | `{fetch_period}` / {len(ohlcv)} 行 |\n"
-            f"| UTC | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} |"
-        )
-        st.dataframe(ohlcv.tail(8), use_container_width=True)
+    with tab_data:
+        try:
+            raw = fetch_price_history(ticker, fetch_period)
+            ohlcv_data = extract_ohlcv(raw)
+            if ohlcv_data.empty:
+                st.warning("データがありません。")
+            else:
+                render_data_collection(ticker, ohlcv_data, fetch_period)
+        except Exception as exc:
+            st.error(str(exc))
+
+    with st.expander("ワークフロー対応状況"):
+        render_workflow_checklist()
 
     render_footer()
 
