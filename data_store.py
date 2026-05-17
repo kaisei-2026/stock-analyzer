@@ -1,4 +1,4 @@
-"""ローカル JSON によるアイデア・デモ口座・知見の保存"""
+"""ローカル JSON によるアイデア・デモ口座・知見・AI自動運用の保存"""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 IDEAS_FILE = DATA_DIR / "investment_ideas.json"
 KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"
 DEMO_ACCOUNT_FILE = DATA_DIR / "demo_account.json"
+AI_AGENT_FILE = DATA_DIR / "ai_agent.json"
+PREDICTION_HISTORY_FILE = DATA_DIR / "prediction_history.json"
 CACHE_DIR = DATA_DIR / "ohlcv_cache"
 
 
@@ -201,6 +203,81 @@ def demo_portfolio_value(account: dict, prices: dict[str, float]) -> float:
         px = prices.get(ticker, pos.get("avg_price", 0.0))
         total += pos["shares"] * px
     return total
+
+
+# --- AI自動運用 (AI Agent) ---
+
+
+def default_ai_agent(initial_cash: float = 300_000.0) -> dict:
+    return {
+        "cash": float(initial_cash),
+        "initial_cash": float(initial_cash),
+        "positions": {},
+        "history": [],
+        "reset_count": 0,
+        "last_run": None,
+        "updated": _now_iso(),
+        "learning_log": [],
+    }
+
+
+def load_ai_agent() -> dict:
+    agent = _load_json(AI_AGENT_FILE, None)
+    if agent is None:
+        agent = default_ai_agent()
+        save_ai_agent(agent)
+    return agent
+
+
+def save_ai_agent(agent: dict) -> None:
+    agent["updated"] = _now_iso()
+    _save_json(AI_AGENT_FILE, agent)
+
+
+def reset_ai_agent(initial_cash: float = 300_000.0) -> dict:
+    agent = load_ai_agent()
+    reset_count = agent.get("reset_count", 0) + 1
+    new_agent = default_ai_agent(initial_cash)
+    new_agent["reset_count"] = reset_count
+    save_ai_agent(new_agent)
+    return new_agent
+
+
+# --- 予測履歴 (Prediction History) ---
+
+
+def list_predictions() -> list[dict]:
+    return _load_json(PREDICTION_HISTORY_FILE, [])
+
+
+def add_prediction(
+    ticker: str,
+    pred_type: str,  # 'direction' or 'price'
+    target_date: str,
+    current_price: float,
+    predicted_value: Any,
+    confidence: float = 0.0,
+) -> None:
+    item = {
+        "id": str(uuid4())[:8],
+        "created": _now_iso(),
+        "ticker": ticker,
+        "type": pred_type,
+        "target_date": target_date,
+        "start_price": current_price,
+        "predicted": predicted_value,
+        "confidence": confidence,
+        "actual_end_price": None,
+        "is_correct": None,
+        "validated": False,
+    }
+    preds = list_predictions()
+    preds.append(item)
+    _save_json(PREDICTION_HISTORY_FILE, preds)
+
+
+def update_predictions(preds: list[dict]) -> None:
+    _save_json(PREDICTION_HISTORY_FILE, preds)
 
 
 # --- OHLCV キャッシュ ---

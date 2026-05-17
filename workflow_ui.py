@@ -11,6 +11,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from ai_predictor import compute_buy_score, predict_direction, predict_price, run_all_predictions
+from prediction_manager import record_prediction
 from backtest_engine import LIBRARY_DOCS, LIBRARY_GITHUB, LIBRARY_NAME, equity_curve_for_plot, run_backtest
 from data_store import (
     add_idea,
@@ -885,6 +886,9 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame, planning_cash: fl
             with st.spinner("AIが学習中…"):
                 result = predict_direction(ohlcv, horizon_days=horizon)
 
+            if result["ok"]:
+                record_prediction(ticker, {"direction": result})
+
             if not result["ok"]:
                 st.error(result.get("error", "予測失敗"))
             else:
@@ -948,6 +952,9 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame, planning_cash: fl
         if st.button("📊 株価予測を実行", type="primary", key="run_price"):
             with st.spinner("AIが計算中…"):
                 result = predict_price(ohlcv, forecast_days=forecast_days)
+
+            if result["ok"]:
+                record_prediction(ticker, {"price": result})
 
             if not result["ok"]:
                 st.error(result.get("error", "予測失敗"))

@@ -27,6 +27,7 @@ from workflow_ui import (
     render_knowledge,
     render_workflow_checklist,
 )
+from ai_agent_ui import render_ai_agent_dashboard
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -460,11 +461,12 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
 
     jp_note = "（4桁 → .T 付与）" if JP_TICKER_PATTERN.fullmatch(ticker_input.strip()) else ""
 
-    tab_analysis, tab_idea, tab_demo, tab_knowledge, tab_data = st.tabs(
+    tab_analysis, tab_idea, tab_demo, tab_ai_agent, tab_knowledge, tab_data = st.tabs(
         [
             "② 分析＆バックテスト",
             "① 投資アイデア",
             "③ デモトレード",
+            "🤖 AI自動運用",
             "⑤ 知見の蓄積",
             "データ収集",
         ]
@@ -513,6 +515,9 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
             auto_refresh=demo_auto,
             refresh_sec=int(demo_refresh_sec),
         )
+
+    with tab_ai_agent:
+        render_ai_agent_dashboard()
 
     with tab_knowledge:
         # ohlcv をセッションに保持して知見タブに渡す
