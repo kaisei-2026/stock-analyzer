@@ -1,12 +1,11 @@
-"""AI自動運用ダッシュボードのUI"""
 
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime
-from ai_agent_engine import run_ai_agent_cycle, get_ai_agent_stats
+from datetime import datetime, timedelta
+from ai_agent_engine import run_ai_agent_cycle, get_ai_agent_stats, get_candidate_stocks
 from prediction_manager import validate_past_predictions
 from data_store import reset_ai_agent, list_watch_tickers, add_watch_ticker, delete_watch_ticker
 
@@ -48,56 +47,39 @@ def render_ai_agent_dashboard() -> None:
                 else:
                     st.warning("銘柄コードを入力してください。")
         
-        st.markdown("---")
-        st.markdown("### 📋 現在の監視銘柄")
-        
+        st.markdown("#### 📋 登録済み監視銘柄")
         watch_list = list_watch_tickers()
         if watch_list:
-            for item in watch_list:
-                with st.container(border=True):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(f"**{item['ticker']}**")
-                        if item.get('name'):
-                            st.caption(f"名前: {item['name']}")
-                        if item.get('notes'):
-                            st.caption(f"📝 {item['notes']}")
-                        st.caption(f"追加日: {item['added_date'][:10]}")
-                    with col2:
-                        if st.button("🗑️", key=f"del_{item['id']}", use_container_width=True):
-                            delete_watch_ticker(item['ticker'])
-                            st.success(f"{item['ticker']} を削除しました。")
-                            st.rerun()
+            for ticker_data in watch_list:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{ticker_data.get('name', ticker_data['ticker'])}** ({ticker_data['ticker']})")
+                    if ticker_data.get('notes'):
+                        st.caption(ticker_data['notes'])
+                with col2:
+                    if st.button("🗑️", key=f"del_{ticker_data['ticker']}", help="削除"):
+                        delete_watch_ticker(ticker_data['ticker'])
+                        st.rerun()
         else:
-            st.info("監視銘柄がまだ登録されていません。\n左パネルで追加してください。")
+            st.info("監視銘柄がまだ登録されていません。")
 
     # メインエリア
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        # 1. 予測成功率の検証と表示
-        with st.expander("📊 過去の予測成功率レポート", expanded=True):
-            stats = validate_past_predictions()
-            if stats["total"] > 0:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("検証済み予測数", f"{stats['validated_count']} / {stats['total']}")
-                c2.metric("総合成功率", f"{stats['success_rate']:.1f}%")
-                
-                # 成功率のゲージ
-                fig = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=stats["success_rate"],
-                    number={"suffix": "%"},
-                    gauge={
-                        "axis": {"range": [0, 100]},
-                        "bar": {"color": "#10b981"},
-                        "steps": [
-                            {"range": [0, 50], "color": "#fee2e2"},
-                            {"range": [50, 70], "color": "#fef9c3"},
-                            {"range": [70, 100], "color": "#dcfce7"},
-                        ]
-                    }
-                ))
+        # 1. 過去の予測成功率
+        st.markdown("#### 📊 過去の予測成功率")
+        stats = validate_past_predictions()
+        if stats and stats.get("total") and stats["total"] > 0:
+            accuracy = (stats["correct"] / stats["total"]) * 100
+            col_acc, col_total = st.columns(2)
+            col_acc.metric("成功率", f"{accuracy:.1f}%")
+            col_total.metric("検証済み予測数", f"{stats['total']}件")
+            
+            if stats.get("history"):
+                fig = go.Figure(data=[
+                    go.Bar(x=list(range(len(stats["history"]))), y=[1 if h["is_correct"] else 0 for h in stats["history"]], marker_color=['green' if h["is_correct"] else 'red' for h in stats["history"]])
+                ])
                 fig.update_layout(height=200, margin=dict(t=0, b=0, l=20, r=20))
                 st.plotly_chart(fig, use_container_width=True)
                 
@@ -117,33 +99,135 @@ def render_ai_agent_dashboard() -> None:
         c2.metric("保有ポジション数", agent_stats['position_count'])
         c3.metric("リセット回数", agent_stats['reset_count'])
         
-        st.markdown("#### 📈 ポートフォリオ")
-        if agent_stats['positions']:
-            pos_list = []
-            for ticker, pos in agent_stats['positions'].items():
-                current_price = pos.get('current_price', pos['entry_price'])
-                profit = (current_price - pos['entry_price']) * pos['shares']
-                profit_pct = ((current_price - pos['entry_price']) / pos['entry_price'] * 100) if pos['entry_price'] > 0 else 0
-                pos_list.append({
-                    '銘柄': ticker,
-                    '保有数': f"{pos['shares']}株",
-                    '取得価格': f"¥{pos['entry_price']:,.0f}",
-                    '現在価格': f"¥{current_price:,.0f}",
-                    '評価額': f"¥{current_price * pos['shares']:,.0f}",
-                    '損益': f"¥{profit:+,.0f} ({profit_pct:+.1f}%)"
-                })
-            pos_df = pd.DataFrame(pos_list)
-            st.dataframe(pos_df, use_container_width=True, hide_index=True)
+        # 次回更新までの時間
+        st.markdown("#### ⏰ 次回更新まで")
+        last_run = agent_stats.get('last_run')
+        if last_run:
+            # 最後の実行時刻から60分後が次回実行予定時刻
+            try:
+                last_run_dt = datetime.fromisoformat(last_run.replace(' UTC', '+00:00'))
+                next_run_dt = last_run_dt + timedelta(minutes=60)
+                now_dt = datetime.now(last_run_dt.tzinfo)
+                remaining = next_run_dt - now_dt
+                
+                if remaining.total_seconds() > 0:
+                    minutes = int(remaining.total_seconds() // 60)
+                    seconds = int(remaining.total_seconds() % 60)
+                    st.info(f"⏳ **{minutes}分 {seconds}秒後** に次のサイクルが実行可能になります。")
+                else:
+                    st.success("✅ 今すぐ実行可能です！")
+            except:
+                st.write("最後の実行: 記録なし")
         else:
-            st.info("現在、保有ポジションはありません。")
+            st.write("最後の実行: 記録なし")
+
+    # 3. 資産推移グラフ
+    st.markdown("---")
+    st.markdown("#### 📈 資産推移")
+    portfolio_history = agent_stats.get('portfolio_history', [])
+    if portfolio_history and len(portfolio_history) > 1:
+        df_history = pd.DataFrame(portfolio_history)
+        df_history['date'] = pd.to_datetime(df_history['date'])
         
-        st.markdown("#### AI 操作パネル")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_history['date'],
+            y=df_history['total_value'],
+            mode='lines+markers',
+            name='総資産',
+            line=dict(color='#1f77b4', width=2),
+            marker=dict(size=4)
+        ))
+        fig.add_trace(go.Scatter(
+            x=df_history['date'],
+            y=df_history['cash'],
+            mode='lines',
+            name='現金',
+            line=dict(color='#ff7f0e', width=1, dash='dash'),
+            marker=dict(size=3)
+        ))
+        fig.add_trace(go.Scatter(
+            x=df_history['date'],
+            y=df_history['positions_value'],
+            mode='lines',
+            name='ポジション評価額',
+            line=dict(color='#2ca02c', width=1, dash='dot'),
+            marker=dict(size=3)
+        ))
         
-        # 監視銘柄の状態を確認
-        watch_list = list_watch_tickers()
-        if not watch_list:
-            st.warning("⚠️ 監視銘柄が登録されていません。\n左のパネルで銘柄を追加してください。")
+        fig.update_layout(
+            title="AI自動運用の資産推移",
+            xaxis_title="日時",
+            yaxis_title="金額（円）",
+            hovermode='x unified',
+            height=400,
+            template='plotly_white'
+        )
+        st.plotly_chart(fig, use_container_width=True)
         
+        # 統計情報
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        with stat_col1:
+            max_value = df_history['total_value'].max()
+            st.metric("最大資産", f"¥{max_value:,.0f}")
+        with stat_col2:
+            min_value = df_history['total_value'].min()
+            st.metric("最小資産", f"¥{min_value:,.0f}")
+        with stat_col3:
+            current_value = df_history['total_value'].iloc[-1]
+            initial_value = df_history['total_value'].iloc[0]
+            change_pct = ((current_value - initial_value) / initial_value * 100) if initial_value > 0 else 0
+            st.metric("累積リターン", f"{change_pct:+.2f}%")
+    else:
+        st.info("資産推移データはまだ記録されていません。AIサイクルを実行してください。")
+
+    # 4. ポートフォリオ
+    st.markdown("---")
+    st.markdown("#### 📊 ポートフォリオ")
+    if agent_stats['positions']:
+        pos_list = []
+        for ticker, pos in agent_stats['positions'].items():
+            current_price = pos.get('current_price', pos['entry_price'])
+            profit = (current_price - pos['entry_price']) * pos['shares']
+            profit_pct = ((current_price - pos['entry_price']) / pos['entry_price'] * 100) if pos['entry_price'] > 0 else 0
+            pos_list.append({
+                '銘柄': ticker,
+                '保有数': f"{pos['shares']}株",
+                '取得価格': f"¥{pos['entry_price']:,.0f}",
+                '現在価格': f"¥{current_price:,.0f}",
+                '評価額': f"¥{current_price * pos['shares']:,.0f}",
+                '損益': f"¥{profit:+,.0f} ({profit_pct:+.1f}%)"
+            })
+        pos_df = pd.DataFrame(pos_list)
+        st.dataframe(pos_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("現在、保有ポジションはありません。")
+
+    # 5. 購入検討リスト
+    st.markdown("---")
+    st.markdown("#### 🎯 購入検討中の銘柄")
+    candidate_stocks = get_candidate_stocks()
+    if candidate_stocks:
+        candidate_list = []
+        for stock in candidate_stocks:
+            candidate_list.append({
+                '銘柄': stock['ticker'],
+                '銘柄名': stock.get('name', ''),
+                '買いスコア': f"{stock['buy_score']:.1f}点",
+                '現在価格': f"¥{stock['current_price']:,.0f}",
+                '推奨理由': stock.get('reason', ''),
+            })
+        cand_df = pd.DataFrame(candidate_list)
+        st.dataframe(cand_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("現在、購入検討中の銘柄はありません。")
+
+    # 6. AI 操作パネル
+    st.markdown("---")
+    st.markdown("#### 🎮 AI 操作パネル")
+    
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
         if st.button("🤖 今すぐAIサイクルを実行", type="primary", use_container_width=True):
             with st.spinner("AIが市場を調査中…"):
                 res = run_ai_agent_cycle()
@@ -151,8 +235,9 @@ def render_ai_agent_dashboard() -> None:
                     st.success("サイクル完了！")
                     st.rerun()
                 else:
-                    st.warning(res["message"])
-        
+                    st.warning(res.get("message", "エラーが発生しました。"))
+    
+    with col_btn2:
         if st.button("🔄 AIをリセット（資金をリセット）", use_container_width=True):
             if st.session_state.get("confirm_reset"):
                 reset_ai_agent()
@@ -163,12 +248,12 @@ def render_ai_agent_dashboard() -> None:
                 st.session_state.confirm_reset = True
                 st.warning("本当にリセットしますか？もう一度ボタンを押してください。")
 
-    # 3. 取引履歴
+    # 7. 取引履歴
     st.markdown("---")
     with st.expander("📜 AI取引履歴", expanded=False):
         agent_data = agent_stats.get('raw_data', {})
-        if agent_data.get('trade_log'):
-            trade_df = pd.DataFrame(agent_data['trade_log'])
+        if agent_data.get('history'):
+            trade_df = pd.DataFrame(agent_data['history'][:20])  # 最新20件
             st.dataframe(trade_df, use_container_width=True, hide_index=True)
         else:
             st.info("まだ取引履歴がありません。")

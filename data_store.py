@@ -219,6 +219,15 @@ def default_ai_agent(initial_cash: float = 300_000.0) -> dict:
         "last_run": None,
         "updated": _now_iso(),
         "learning_log": [],
+        "portfolio_history": [  # 資産推移の記録
+            {
+                "date": _now_iso(),
+                "total_value": float(initial_cash),
+                "cash": float(initial_cash),
+                "positions_value": 0.0,
+                "position_count": 0
+            }
+        ],
     }
 
 
