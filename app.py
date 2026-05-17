@@ -1,4 +1,4 @@
-"""株価分析 Web アプリ（Streamlit + yfinance）"""
+"""株価分析 Web アプリ — ローソク足 × チャネルブレイクアウト"""
 
 from __future__ import annotations
 
@@ -7,42 +7,74 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
+from backtest_engine import (
+    LIBRARY_DOCS,
+    LIBRARY_GITHUB,
+    LIBRARY_NAME,
+    equity_curve_for_plot,
+    normalize_ohlcv,
+    run_backtest,
+)
+
 # ---------------------------------------------------------------------------
-# 定数・設定
+# 定数
 # ---------------------------------------------------------------------------
 
 DATA_SOURCE = "Yahoo Finance（yfinance 経由・無料）"
 DISCLAIMER = (
-    "※本ツールは過去データに基づく統計的参考情報を表示するものであり、"
-    "将来の株価や投資成果を保証するものではありません。投資判断は自己責任で行ってください。"
+    "※本ツールは過去データに基づく統計的参考情報です。"
+    "将来の利益を保証しません。投資は自己責任で行ってください。"
 )
 
 PERIOD_OPTIONS = ("1日", "1週間", "2週間", "1か月")
-
 PERIOD_CONFIG: dict[str, dict[str, int | str]] = {
-    "1日": {"fetch_period": "3mo", "chart_days": 30, "sma_window": 1, "horizon_days": 1},
-    "1週間": {"fetch_period": "6mo", "chart_days": 60, "sma_window": 5, "horizon_days": 5},
-    "2週間": {"fetch_period": "1y", "chart_days": 90, "sma_window": 10, "horizon_days": 10},
-    "1か月": {"fetch_period": "2y", "chart_days": 180, "sma_window": 20, "horizon_days": 20},
+    "1日": {"fetch_period": "3mo", "chart_days": 40, "channel_period": 5, "horizon_days": 1},
+    "1週間": {"fetch_period": "6mo", "chart_days": 70, "channel_period": 10, "horizon_days": 5},
+    "2週間": {"fetch_period": "1y", "chart_days": 100, "channel_period": 20, "horizon_days": 10},
+    "1か月": {"fetch_period": "2y", "chart_days": 160, "channel_period": 20, "horizon_days": 20},
 }
 
 JP_TICKER_PATTERN = re.compile(r"^\d{4}$")
-
 SIMULATION_OPTIONS = ("1年", "2年")
 SIMULATION_FETCH = {"1年": "1y", "2年": "2y"}
 SIMULATION_TRADING_DAYS = {"1年": 252, "2年": 504}
 
+# チャート・UI テーマ
+COLORS = {
+    "bg": "#0b0f19",
+    "panel": "#121826",
+    "grid": "#1e293b",
+    "text": "#e2e8f0",
+    "up": "#22d3ee",
+    "down": "#f43f5e",
+    "channel_hi": "#a78bfa",
+    "channel_lo": "#fb923c",
+    "channel_fill": "rgba(167, 139, 250, 0.08)",
+    "buy": "#4ade80",
+    "sell": "#fb7185",
+    "equity": "#34d399",
+    "benchmark": "#64748b",
+}
+
+CHART_LAYOUT = dict(
+    paper_bgcolor=COLORS["bg"],
+    plot_bgcolor=COLORS["panel"],
+    font=dict(color=COLORS["text"], family="Segoe UI, Hiragino Sans, sans-serif"),
+    xaxis=dict(gridcolor=COLORS["grid"], zerolinecolor=COLORS["grid"]),
+    yaxis=dict(gridcolor=COLORS["grid"], zerolinecolor=COLORS["grid"]),
+)
+
 
 # ---------------------------------------------------------------------------
-# データ処理
+# データ
 # ---------------------------------------------------------------------------
 
 
 def normalize_ticker(raw: str) -> str:
-    """日本株（4桁数字のみ）には .T を付与する。"""
     s = raw.strip().upper()
     if JP_TICKER_PATTERN.fullmatch(s):
         return f"{s}.T"
@@ -50,7 +82,6 @@ def normalize_ticker(raw: str) -> str:
 
 
 def fetch_price_history(ticker: str, fetch_period: str) -> pd.DataFrame:
-    """日足終値を取得。空の場合は Ticker.history にフォールバック。"""
     df = yf.download(
         ticker,
         period=fetch_period,
@@ -64,151 +95,243 @@ def fetch_price_history(ticker: str, fetch_period: str) -> pd.DataFrame:
     return df
 
 
-def extract_close(df: pd.DataFrame) -> pd.Series:
-    """マルチインデックス列を考慮し、終値を数値 Series として返す。"""
+def extract_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """OHLCV を正規化（列名は大小文字不問 → backtest_engine.normalize_ohlcv）。"""
     if df.empty:
-        return pd.Series(dtype=float)
-
-    work = df.copy()
-    if isinstance(work.columns, pd.MultiIndex):
-        level0 = work.columns.get_level_values(0)
-        if "Close" in level0:
-            close = work["Close"]
-        elif "Adj Close" in level0:
-            close = work["Adj Close"]
-        else:
-            raise KeyError("終値（Close）列が見つかりません。")
-    elif "Close" in work.columns:
-        close = work["Close"]
-    elif "Adj Close" in work.columns:
-        close = work["Adj Close"]
-    else:
-        raise KeyError("終値（Close）列が見つかりません。")
-
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
-
-    close = pd.to_numeric(close, errors="coerce")
-    close = close.dropna()
-    close.name = "Close"
-    return close
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    try:
+        return normalize_ohlcv(df)
+    except ValueError:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
-def compute_sma(close: pd.Series, window: int) -> pd.Series:
-    return close.rolling(window=window, min_periods=window).mean()
+def trim_ohlcv(ohlcv: pd.DataFrame, trading_days: int) -> pd.DataFrame:
+    return ohlcv.tail(min(trading_days, len(ohlcv)))
 
 
-def run_backtest(close: pd.Series, sma_window: int, horizon_days: int) -> dict:
+# ---------------------------------------------------------------------------
+# チャネルブレイクアウト（ドンチャン）
+# ---------------------------------------------------------------------------
+
+
+def compute_donchian_channel(ohlcv: pd.DataFrame, period: int) -> pd.DataFrame:
     """
-    シグナル: 終値 > SMA → 上昇シグナル、それ以外 → 下落シグナル。
-    各シグナル時点から horizon_days 後の騰落率を集計し、上昇確率を算出。
+    前日までの N 日間の高値・安値でチャネルを構成（先読みなし）。
+    upper: 当日を除く過去 period 日の最高値
+    lower: 当日を除く過去 period 日の最安値
     """
-    sma = compute_sma(close, sma_window)
-    aligned = pd.DataFrame({"close": close, "sma": sma}).dropna()
-    aligned["forward_return"] = aligned["close"].shift(-horizon_days) / aligned["close"] - 1.0
-    aligned = aligned.dropna(subset=["forward_return"])
-
-    if aligned.empty:
-        return {
-            "sample_size": 0,
-            "p_up": None,
-            "p_down": None,
-            "avg_return_pct": None,
-            "bull": None,
-            "bear": None,
-            "current_bullish": None,
-        }
-
-    aligned["bullish"] = aligned["close"] > aligned["sma"]
-
-    def regime_stats(mask: pd.Series) -> dict | None:
-        subset = aligned.loc[mask, "forward_return"]
-        if subset.empty:
-            return None
-        return {
-            "n": int(len(subset)),
-            "p_up": float((subset > 0).mean() * 100),
-            "avg_return_pct": float(subset.mean() * 100),
-        }
-
-    bull = regime_stats(aligned["bullish"])
-    bear = regime_stats(~aligned["bullish"])
-    current_bullish = bool(close.iloc[-1] > sma.iloc[-1]) if pd.notna(sma.iloc[-1]) else None
-
-    if current_bullish is True and bull:
-        p_up = bull["p_up"]
-    elif current_bullish is False and bear:
-        p_up = bear["p_up"]
-    else:
-        p_up = float((aligned["forward_return"] > 0).mean() * 100)
-
-    return {
-        "sample_size": int(len(aligned)),
-        "p_up": p_up,
-        "p_down": 100.0 - p_up,
-        "avg_return_pct": float(aligned["forward_return"].mean() * 100),
-        "bull": bull,
-        "bear": bear,
-        "current_bullish": current_bullish,
-    }
+    upper = ohlcv["High"].rolling(period, min_periods=period).max().shift(1)
+    lower = ohlcv["Low"].rolling(period, min_periods=period).min().shift(1)
+    mid = (upper + lower) / 2
+    return pd.DataFrame({"upper": upper, "lower": lower, "mid": mid}, index=ohlcv.index)
 
 
-def trim_trading_days(close: pd.Series, trading_days: int) -> pd.Series:
-    """直近 N 営業日分に切り詰める。"""
-    return close.tail(min(trading_days, len(close)))
-
-
-def simulate_portfolio(
-    close: pd.Series,
-    sma_window: int,
-    initial_capital: float,
-) -> dict:
+def run_channel_state_machine(ohlcv: pd.DataFrame, channel_period: int) -> pd.DataFrame:
     """
-    SMA シグナルに従ったロングオンリー・バックテスト。
-
-    ルール（前日終値で判定、当日の騰落を反映）:
-      - 前日終値 > SMA → 当日は株式を保有（日次リターンを享受）
-      - 前日終値 ≤ SMA → 当日は現金（リターン 0）
-    取引コスト・税金・スリッページは含みません。
+    エントリー: 終値がチャネル上限を上抜け → ロング
+    イグジット: 終値がチャネル下限を下抜け → 現金
+  当日始値時点のポジションは前日シグナル確定後の状態。
     """
-    sma = compute_sma(close, sma_window)
-    df = pd.DataFrame({"close": close, "sma": sma}).dropna()
-    if len(df) < 2:
-        return {"ok": False}
+    ch = compute_donchian_channel(ohlcv, channel_period)
+    df = ohlcv.join(ch).dropna().copy()
+    if df.empty:
+        return df
 
-    df["signal"] = df["close"] > df["sma"]
-    df["position"] = df["signal"].shift(1).eq(True).astype(float)
-    df["daily_ret"] = df["close"].pct_change()
+    in_position = False
+    positions_start: list[float] = []
+    positions_end: list[float] = []
+    entries: list[bool] = []
+    exits: list[bool] = []
+
+    for _, row in df.iterrows():
+        pos_start = 1.0 if in_position else 0.0
+        positions_start.append(pos_start)
+
+        entry = (not in_position) and (row["Close"] > row["upper"])
+        exit_ = in_position and (row["Close"] < row["lower"])
+        entries.append(entry)
+        exits.append(exit_)
+
+        if entry:
+            in_position = True
+        elif exit_:
+            in_position = False
+
+        positions_end.append(1.0 if in_position else 0.0)
+
+    df["position"] = positions_start
+    df["position_eod"] = positions_end
+    df["entry_signal"] = entries
+    df["exit_signal"] = exits
+    df["daily_ret"] = df["Close"].pct_change()
     df["strategy_ret"] = df["position"] * df["daily_ret"]
     df.loc[df.index[0], "strategy_ret"] = 0.0
+    return df
 
-    df["equity"] = initial_capital * (1 + df["strategy_ret"]).cumprod()
-    first_close = float(df["close"].iloc[0])
-    df["buy_hold_equity"] = initial_capital * (df["close"] / first_close)
 
-    final_strategy = float(df["equity"].iloc[-1])
-    final_buy_hold = float(df["buy_hold_equity"].iloc[-1])
-    peak = df["equity"].cummax()
-    max_drawdown_pct = float(((df["equity"] - peak) / peak).min() * 100)
-    trades = int((df["position"].diff().fillna(0).abs() > 0).sum())
-    in_market_pct = float(df["position"].mean() * 100)
+def run_breakout_backtest(ohlcv: pd.DataFrame, channel_period: int, horizon_days: int) -> dict:
+    """ブレイクアウト / ブレイクダウン後の先読みリターン統計。"""
+    ch = compute_donchian_channel(ohlcv, channel_period)
+    df = ohlcv.join(ch).dropna()
+    df["forward_return"] = df["Close"].shift(-horizon_days) / df["Close"] - 1.0
+    df = df.dropna(subset=["forward_return"])
+    if df.empty:
+        return {"sample_size": 0, "p_up": None, "p_down": None, "current_signal": None}
+
+    df["breakout"] = df["Close"] > df["upper"]
+    df["breakdown"] = df["Close"] < df["lower"]
+
+    def stats(mask: pd.Series) -> dict | None:
+        sub = df.loc[mask, "forward_return"]
+        if sub.empty:
+            return None
+        return {
+            "n": int(len(sub)),
+            "p_up": float((sub > 0).mean() * 100),
+            "avg_return_pct": float(sub.mean() * 100),
+        }
+
+    bo = stats(df["breakout"])
+    bd = stats(df["breakdown"])
+    last = df.iloc[-1]
+    if last["Close"] > last["upper"]:
+        current = "ブレイクアウト（上限突破）"
+        p_up = bo["p_up"] if bo else None
+    elif last["Close"] < last["lower"]:
+        current = "ブレイクダウン（下限割れ）"
+        p_up = bd["p_up"] if bd else None
+    else:
+        current = "チャネル内"
+        p_up = float((df["forward_return"] > 0).mean() * 100)
 
     return {
-        "ok": True,
-        "df": df,
-        "initial_capital": initial_capital,
-        "final_strategy": final_strategy,
-        "final_buy_hold": final_buy_hold,
-        "pnl_strategy": final_strategy - initial_capital,
-        "pnl_buy_hold": final_buy_hold - initial_capital,
-        "return_strategy_pct": (final_strategy / initial_capital - 1) * 100,
-        "return_buy_hold_pct": (final_buy_hold / initial_capital - 1) * 100,
-        "max_drawdown_pct": max_drawdown_pct,
-        "trades": trades,
-        "in_market_pct": in_market_pct,
-        "start_date": df.index[0],
-        "end_date": df.index[-1],
+        "sample_size": int(len(df)),
+        "p_up": p_up,
+        "p_down": (100.0 - p_up) if p_up is not None else None,
+        "breakout": bo,
+        "breakdown": bd,
+        "current_signal": current,
+        "last_upper": float(last["upper"]),
+        "last_lower": float(last["lower"]),
+        "dist_to_upper_pct": float((last["upper"] - last["Close"]) / last["Close"] * 100),
+        "dist_to_lower_pct": float((last["Close"] - last["lower"]) / last["Close"] * 100),
     }
+
+
+# ---------------------------------------------------------------------------
+# チャート
+# ---------------------------------------------------------------------------
+
+
+def style_figure(fig: go.Figure, height: int = 520) -> go.Figure:
+    fig.update_layout(**CHART_LAYOUT, height=height, hovermode="x unified")
+    return fig
+
+
+def build_candlestick_chart(
+    ohlcv: pd.DataFrame,
+    channel_period: int,
+    chart_days: int,
+    ticker: str,
+) -> go.Figure:
+    df = run_channel_state_machine(ohlcv, channel_period).tail(chart_days)
+    if df.empty:
+        return go.Figure()
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.75, 0.25],
+    )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="ローソク足",
+            increasing_line_color=COLORS["up"],
+            increasing_fillcolor=COLORS["up"],
+            decreasing_line_color=COLORS["down"],
+            decreasing_fillcolor=COLORS["down"],
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["upper"],
+            name=f"チャネル上限 ({channel_period}日高値)",
+            line=dict(color=COLORS["channel_hi"], width=1.5),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["lower"],
+            name=f"チャネル下限 ({channel_period}日安値)",
+            line=dict(color=COLORS["channel_lo"], width=1.5),
+            fill="tonexty",
+            fillcolor=COLORS["channel_fill"],
+        ),
+        row=1,
+        col=1,
+    )
+
+    buy_df = df[df["entry_signal"]]
+    sell_df = df[df["exit_signal"]]
+    if not buy_df.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=buy_df.index,
+                y=buy_df["Close"],
+                mode="markers",
+                name="エントリー（上抜け）",
+                marker=dict(symbol="triangle-up", size=14, color=COLORS["buy"], line=dict(width=1, color="white")),
+            ),
+            row=1,
+            col=1,
+        )
+    if not sell_df.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=sell_df.index,
+                y=sell_df["Close"],
+                mode="markers",
+                name="イグジット（下抜け）",
+                marker=dict(symbol="triangle-down", size=14, color=COLORS["sell"], line=dict(width=1, color="white")),
+            ),
+            row=1,
+            col=1,
+        )
+
+    vol_colors = [
+        COLORS["up"] if c >= o else COLORS["down"]
+        for o, c in zip(df["Open"], df["Close"])
+    ]
+    fig.add_trace(
+        go.Bar(x=df.index, y=df["Volume"], name="出来高", marker_color=vol_colors, opacity=0.55),
+        row=2,
+        col=1,
+    )
+
+    fig.update_layout(
+        title=dict(text=f"{ticker} ｜ チャネルブレイクアウト", x=0.02, font=dict(size=18)),
+        xaxis_rangeslider_visible=False,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1),
+    )
+    fig.update_yaxes(title_text="価格", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    return style_figure(fig, height=620)
 
 
 def build_equity_chart(df: pd.DataFrame, ticker: str, sim_label: str) -> go.Figure:
@@ -217,65 +340,27 @@ def build_equity_chart(df: pd.DataFrame, ticker: str, sim_label: str) -> go.Figu
         go.Scatter(
             x=df.index,
             y=df["equity"],
-            name="シグナル運用（総資産）",
-            line=dict(color="#059669", width=2),
+            name="ブレイクアウト戦略",
+            line=dict(color=COLORS["equity"], width=2.5),
+            fill="tozeroy",
+            fillcolor="rgba(52, 211, 153, 0.12)",
         )
     )
     fig.add_trace(
         go.Scatter(
             x=df.index,
             y=df["buy_hold_equity"],
-            name="買い持ち（比較）",
-            line=dict(color="#6b7280", width=2, dash="dash"),
+            name="買い持ち",
+            line=dict(color=COLORS["benchmark"], width=2, dash="dash"),
         )
     )
     fig.update_layout(
-        title=f"{ticker} — 過去{sim_label}の総資産シミュレーション",
+        title=dict(text=f"{ticker} ｜ 過去{sim_label} 総資産シミュレーション", x=0.02),
         xaxis_title="日付",
-        yaxis_title="総資産",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=40, r=20, t=60, b=40),
+        yaxis_title="総資産（円）",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1),
     )
-    return fig
-
-
-def build_chart(
-    close: pd.Series,
-    sma: pd.Series,
-    ticker: str,
-    sma_window: int,
-    chart_days: int,
-) -> go.Figure:
-    plot_close = close.tail(chart_days)
-    plot_sma = sma.reindex(plot_close.index)
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=plot_close.index,
-            y=plot_close.values,
-            name="株価（終値）",
-            line=dict(color="#2563eb", width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_sma.index,
-            y=plot_sma.values,
-            name=f"移動平均（SMA {sma_window}）",
-            line=dict(color="#dc2626", width=2, dash="dot"),
-        )
-    )
-    fig.update_layout(
-        title=f"{ticker} — 株価と移動平均線",
-        xaxis_title="日付",
-        yaxis_title="価格",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=40, r=20, t=60, b=40),
-    )
-    return fig
+    return style_figure(fig, height=400)
 
 
 # ---------------------------------------------------------------------------
@@ -283,44 +368,100 @@ def build_chart(
 # ---------------------------------------------------------------------------
 
 
+def inject_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp { background: linear-gradient(160deg, #0b0f19 0%, #111827 50%, #0f172a 100%); }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0f172a 0%, #1e1b4b 100%);
+            border-right: 1px solid #334155;
+        }
+        h1 {
+            background: linear-gradient(90deg, #22d3ee, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800 !important;
+        }
+        [data-testid="stMetric"] {
+            background: rgba(18, 24, 38, 0.85);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 12px 16px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+        }
+        [data-testid="stMetricValue"] { color: #f1f5f9 !important; }
+        .signal-banner {
+            padding: 16px 20px;
+            border-radius: 12px;
+            border: 1px solid #475569;
+            background: rgba(30, 41, 59, 0.9);
+            margin-bottom: 1rem;
+        }
+        .signal-banner strong { color: #22d3ee; font-size: 1.1rem; }
+        div[data-testid="stExpander"] {
+            background: rgba(18, 24, 38, 0.6);
+            border-radius: 10px;
+            border: 1px solid #334155;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_footer() -> None:
     st.markdown("---")
     st.caption(DISCLAIMER)
 
 
+def fmt_date(idx) -> str:
+    return idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+
+
 def main() -> None:
-    st.set_page_config(page_title="株価分析ツール", page_icon="📈", layout="wide")
-    st.title("株価分析ツール")
-    st.caption("終値トレンド・移動平均・過去シグナルに基づく統計的な方向性参考")
+    st.set_page_config(
+        page_title="Breakout Trader",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    inject_theme()
+    st.title("Breakout Trader")
+    st.caption("ローソク足 × ドンチャンチャネルブレイクアウト ｜ バックテスト付き")
 
     with st.sidebar:
-        st.header("設定")
-        ticker_input = st.text_input(
-            "銘柄コード",
-            value="7203",
-            help="例: AAPL（米国株）、7203 または 7203.T（日本株・4桁は自動で .T 付与）",
-        )
-        period_label = st.radio("分析期間", PERIOD_OPTIONS, index=2)
+        st.header("⚙ トレード設定")
+        ticker_input = st.text_input("銘柄コード", value="7203", help="4桁数字 → 自動で .T")
+        period_label = st.radio("チャネル期間（分析）", PERIOD_OPTIONS, index=2)
         sim_label = st.radio("総資産シミュレーション", SIMULATION_OPTIONS, index=0)
         initial_capital = st.number_input(
-            "初期資金（円）",
-            min_value=10_000,
-            max_value=1_000_000_000,
-            value=1_000_000,
-            step=100_000,
-            format="%d",
+            "初期資金（円）", min_value=10_000, max_value=1_000_000_000,
+            value=1_000_000, step=100_000, format="%d",
+        )
+        commission_pct = st.number_input(
+            "片道手数料（%）",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.0,
+            step=0.01,
+            format="%.3f",
+            help="backtesting.py の commission（例: 0.1% → 0.001）",
         )
         st.markdown("---")
         st.markdown(
-            f"**データ源**\n\n{DATA_SOURCE}\n\n"
-            "予測・シミュレーションは「終値が移動平均より上か下か」のルールに基づきます。"
+            f"**戦略**\n\n"
+            f"過去 N 日の**高値**を上限・**安値**を下限とするチャネル。\n\n"
+            f"• 終値が上限を**上抜け** → エントリー\n"
+            f"• 終値が下限を**下抜け** → イグジット\n\n"
+            f"**データ:** {DATA_SOURCE}"
         )
 
     ticker = normalize_ticker(ticker_input)
     cfg = PERIOD_CONFIG[period_label]
     fetch_period = str(cfg["fetch_period"])
     chart_days = int(cfg["chart_days"])
-    sma_window = int(cfg["sma_window"])
+    channel_period = int(cfg["channel_period"])
     horizon_days = int(cfg["horizon_days"])
 
     if not ticker:
@@ -328,172 +469,176 @@ def main() -> None:
         render_footer()
         return
 
-    st.info(f"照会ティッカー: **{ticker}**" + ("（4桁コードから .T を付与）" if JP_TICKER_PATTERN.fullmatch(ticker_input.strip()) else ""))
+    jp_note = "（4桁 → .T 付与）" if JP_TICKER_PATTERN.fullmatch(ticker_input.strip()) else ""
+    st.markdown(f"**{ticker}** {jp_note}")
 
     try:
-        with st.spinner("株価データを取得しています…"):
-            raw_df = fetch_price_history(ticker, fetch_period)
-            close = extract_close(raw_df)
+        with st.spinner("マーケットデータ取得中…"):
+            raw = fetch_price_history(ticker, fetch_period)
+            ohlcv = extract_ohlcv(raw)
     except Exception as exc:
-        st.error(f"データ取得に失敗しました: {exc}")
+        st.error(f"データ取得失敗: {exc}")
         render_footer()
         return
 
-    if close.empty:
-        st.error(f"「{ticker}」のデータが見つかりませんでした。銘柄コードを確認してください。")
+    if ohlcv.empty:
+        st.error(f"「{ticker}」のデータがありません。")
         render_footer()
         return
 
-    sma = compute_sma(close, sma_window)
-    latest_close = float(close.iloc[-1])
-    latest_sma = float(sma.iloc[-1]) if pd.notna(sma.iloc[-1]) else None
-    latest_date = close.index[-1]
-    if hasattr(latest_date, "strftime"):
-        latest_date_str = latest_date.strftime("%Y-%m-%d")
-    else:
-        latest_date_str = str(latest_date)[:10]
+    state_df = run_channel_state_machine(ohlcv, channel_period)
+    bt = run_breakout_backtest(ohlcv, channel_period, horizon_days)
+    latest = ohlcv.iloc[-1]
+    in_market = bool(state_df["position_eod"].iloc[-1]) if not state_df.empty else False
 
-    backtest = run_backtest(close, sma_window, horizon_days)
-
-    # --- メトリクス ---
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("直近の終値", f"{latest_close:,.2f}")
-    col2.metric("直近 SMA", f"{latest_sma:,.2f}" if latest_sma is not None else "—")
-    col3.metric("データ最終日", latest_date_str)
-    col4.metric(
-        "現在のトレンド",
-        "終値 > SMA" if backtest.get("current_bullish") else "終値 ≤ SMA",
+    # --- シグナルバナー ---
+    signal_text = bt.get("current_signal") or "—"
+    pos_label = "🟢 ロング保有中" if in_market else "⚪ 現金待機"
+    st.markdown(
+        f'<div class="signal-banner">'
+        f"<strong>{pos_label}</strong> ｜ 状態: {signal_text} ｜ "
+        f"チャネル {channel_period} 日</div>",
+        unsafe_allow_html=True,
     )
 
-    # --- チャート ---
-    st.subheader("株価チャート")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("直近終値", f"{latest['Close']:,.2f}")
+    c2.metric("チャネル上限", f"{bt.get('last_upper', 0):,.2f}")
+    c3.metric("チャネル下限", f"{bt.get('last_lower', 0):,.2f}")
+    c4.metric("上限まで", f"{bt.get('dist_to_upper_pct', 0):+.2f}%")
+    c5.metric("データ日", fmt_date(ohlcv.index[-1]))
+
+    # --- ローソク足チャート ---
+    st.subheader("📈 ローソク足 & チャネル")
     st.plotly_chart(
-        build_chart(close, sma, ticker, sma_window, chart_days),
+        build_candlestick_chart(ohlcv, channel_period, chart_days, ticker),
         use_container_width=True,
+        config={"displayModeBar": True, "scrollZoom": True},
     )
 
-    # --- 方向性（バックテスト根拠付き） ---
-    st.subheader(f"方向性参考（{period_label} 先の過去実績ベース）")
+    # --- 方向性統計 ---
+    st.subheader(f"🎯 ブレイクアウト統計（{period_label} 先）")
     st.markdown(
-        f"**ルール**: 終値が SMA（{sma_window} 日）より上なら上昇シグナル、下なら下落シグナル。"
-        f" 各シグナルから **{horizon_days} 営業日後** の騰落率を集計しています。"
+        f"過去 **{channel_period} 日**の高値・安値チャネルで、"
+        f"上抜け / 下抜け後 **{horizon_days} 営業日**の騰落率を集計。"
     )
 
-    if backtest["p_up"] is None or backtest["sample_size"] < 10:
-        st.warning(
-            "バックテストに必要なデータが不足しています。"
-            " 期間を長めに選ぶか、別銘柄をお試しください。"
-        )
+    if bt.get("p_up") is None or bt["sample_size"] < 10:
+        st.warning("統計サンプルが不足しています。期間を長くするか別銘柄を試してください。")
     else:
-        p_up = backtest["p_up"]
-        p_down = backtest["p_down"]
         m1, m2, m3 = st.columns(3)
-        m1.metric(f"{period_label} 先に上昇した確率（参考）", f"{p_up:.1f}%")
-        m2.metric(f"{period_label} 先に下落した確率（参考）", f"{p_down:.1f}%")
-        m3.metric("バックテスト平均リターン", f"{backtest['avg_return_pct']:+.2f}%")
+        m1.metric(f"{period_label} 先 上昇確率", f"{bt['p_up']:.1f}%")
+        m2.metric(f"{period_label} 先 下落確率", f"{bt['p_down']:.1f}%")
+        m3.metric("現在の状態", bt["current_signal"])
 
-        st.progress(p_up / 100.0, text=f"上昇 {p_up:.1f}% / 下落 {p_down:.1f}%")
+        st.progress(bt["p_up"] / 100.0)
 
-        regime_cols = st.columns(2)
-        with regime_cols[0]:
-            st.markdown("**上昇シグナル時（終値 > SMA）**")
-            bull = backtest["bull"]
-            if bull:
-                st.write(f"- サンプル数: {bull['n']}")
-                st.write(f"- {horizon_days} 日後に上昇した割合: **{bull['p_up']:.1f}%**")
-                st.write(f"- 平均リターン: {bull['avg_return_pct']:+.2f}%")
+        r1, r2 = st.columns(2)
+        with r1:
+            st.markdown("**上抜け（ブレイクアウト）後**")
+            bo = bt.get("breakout")
+            if bo:
+                st.write(f"サンプル {bo['n']} ｜ 上昇 {bo['p_up']:.1f}% ｜ 平均 {bo['avg_return_pct']:+.2f}%")
+            else:
+                st.write("データ不足")
+        with r2:
+            st.markdown("**下抜け（ブレイクダウン）後**")
+            bd = bt.get("breakdown")
+            if bd:
+                st.write(f"サンプル {bd['n']} ｜ 上昇 {bd['p_up']:.1f}% ｜ 平均 {bd['avg_return_pct']:+.2f}%")
             else:
                 st.write("データ不足")
 
-        with regime_cols[1]:
-            st.markdown("**下落シグナル時（終値 ≤ SMA）**")
-            bear = backtest["bear"]
-            if bear:
-                st.write(f"- サンプル数: {bear['n']}")
-                st.write(f"- {horizon_days} 日後に上昇した割合: **{bear['p_up']:.1f}%**")
-                st.write(f"- 平均リターン: {bear['avg_return_pct']:+.2f}%")
-            else:
-                st.write("データ不足")
-
-        st.caption(
-            f"現在のシグナルに該当する過去パターンから上昇確率を表示しています。"
-            f" 全サンプル数: {backtest['sample_size']} 件（重複なしの営業日ベース）。"
-        )
-
-    # --- 総資産シミュレーション（1年 / 2年） ---
-    st.subheader(f"総資産シミュレーション（過去{sim_label}）")
-    st.markdown(
-        f"**初期資金 {initial_capital:,.0f} 円** で、SMA（{sma_window} 日）シグナルに従い取引した場合の総資産推移です。"
-        " 終値 > SMA の翌営業日から保有、終値 ≤ SMA の翌営業日から現金化（ロングオンリー）。"
-        " 手数料・税金は未考慮です。"
+    # --- バックテスト（backtesting.py） ---
+    st.subheader(f"💰 バックテスト（過去{sim_label}）")
+    st.caption(
+        f"エンジン: **[{LIBRARY_NAME}]({LIBRARY_GITHUB})** ｜ "
+        f"[API ドキュメント]({LIBRARY_DOCS}) ｜ "
+        f"初期 {initial_capital:,.0f} 円 ｜ チャネル {channel_period} 日 ｜ "
+        f"手数料 {commission_pct:.3f}%（片道）"
     )
-
-    sim_fetch = SIMULATION_FETCH[sim_label]
-    sim_days = SIMULATION_TRADING_DAYS[sim_label]
 
     try:
-        sim_raw = fetch_price_history(ticker, sim_fetch)
-        sim_close = trim_trading_days(extract_close(sim_raw), sim_days)
-        portfolio = simulate_portfolio(sim_close, sma_window, float(initial_capital))
+        sim_raw = fetch_price_history(ticker, SIMULATION_FETCH[sim_label])
+        sim_ohlcv = trim_ohlcv(extract_ohlcv(sim_raw), SIMULATION_TRADING_DAYS[sim_label])
+        port = run_backtest(
+            sim_ohlcv,
+            channel_period=channel_period,
+            cash=float(initial_capital),
+            commission=float(commission_pct) / 100.0,
+        )
     except Exception as exc:
-        st.error(f"シミュレーションの計算に失敗しました: {exc}")
-        portfolio = {"ok": False}
+        st.error(f"バックテスト失敗: {exc}")
+        port = {"ok": False, "error": str(exc)}
 
-    if not portfolio.get("ok"):
-        st.warning("シミュレーションに必要なデータが不足しています。")
-    else:
-        sim_df = portfolio["df"]
-        start_s = portfolio["start_date"].strftime("%Y-%m-%d") if hasattr(portfolio["start_date"], "strftime") else str(portfolio["start_date"])[:10]
-        end_s = portfolio["end_date"].strftime("%Y-%m-%d") if hasattr(portfolio["end_date"], "strftime") else str(portfolio["end_date"])[:10]
-
-        s1, s2, s3, s4 = st.columns(4)
+    if port.get("ok"):
+        beats_bh = port["final_strategy"] >= port["final_buy_hold"]
+        s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric(
-            f"シグナル運用後の総資産（{sim_label}）",
-            f"{portfolio['final_strategy']:,.0f} 円",
-            f"{portfolio['pnl_strategy']:+,.0f} 円",
+            "最終総資産（戦略）",
+            f"{port['final_strategy']:,.0f} 円",
+            f"{port['pnl_strategy']:+,.0f} 円",
         )
-        s2.metric("リターン（シグナル運用）", f"{portfolio['return_strategy_pct']:+.2f}%")
-        s3.metric(
-            "買い持ち後の総資産（比較）",
-            f"{portfolio['final_buy_hold']:,.0f} 円",
-            f"{portfolio['pnl_buy_hold']:+,.0f} 円",
-        )
-        s4.metric("リターン（買い持ち）", f"{portfolio['return_buy_hold_pct']:+.2f}%")
+        s2.metric("リターン（戦略）", f"{port['return_strategy_pct']:+.2f}%")
+        s3.metric("買い持ちリターン", f"{port['return_buy_hold_pct']:+.2f}%")
+        s4.metric("最大ドローダウン", f"{port['max_drawdown_pct']:.2f}%")
+        s5.metric("シャープレシオ", f"{port['sharpe']:.2f}")
 
-        diff = portfolio["final_strategy"] - portfolio["final_buy_hold"]
-        st.caption(
-            f"期間: {start_s} 〜 {end_s} ／ "
-            f"売買回数（ポジション切替）: {portfolio['trades']} 回 ／ "
-            f"株式保有率: {portfolio['in_market_pct']:.1f}% ／ "
-            f"最大ドローダウン（シグナル運用）: {portfolio['max_drawdown_pct']:.2f}% ／ "
-            f"買い持ちとの差額: {diff:+,.0f} 円"
+        diff = port["final_strategy"] - port["final_buy_hold"]
+        verdict = "✅ 買い持ちを上回る" if beats_bh else "⚠️ 買い持ちに劣る"
+        st.info(
+            f"{verdict}（差額 {diff:+,.0f} 円）｜ "
+            f"取引回数 {port['num_trades']} ｜ 勝率 {port['win_rate_pct']:.1f}% ｜ "
+            f"PF {port['profit_factor']:.2f}"
         )
 
-        st.plotly_chart(
-            build_equity_chart(sim_df, ticker, sim_label),
-            use_container_width=True,
-        )
+        plot_df = equity_curve_for_plot(port)
+        if not plot_df.empty:
+            st.plotly_chart(
+                build_equity_chart(plot_df, ticker, sim_label),
+                use_container_width=True,
+            )
 
-    # --- データ透明性 ---
-    with st.expander("データ源・取得内容の詳細", expanded=False):
+        with st.expander("📊 backtesting.py 算出メトリクス（全項目）", expanded=False):
+            metrics_df = pd.DataFrame(
+                [{"指標": k, "値": v} for k, v in port["metrics"].items()]
+            )
+            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+        with st.expander("📒 約定履歴（_trades）", expanded=False):
+            if not port["trades"].empty:
+                st.dataframe(port["trades"], use_container_width=True)
+            else:
+                st.write("約定なし")
+    else:
+        st.warning(port.get("error", "バックテスト用データが不足しています。"))
+
+    # --- 直近トレードログ ---
+    with st.expander("📋 直近のエントリー / イグジット", expanded=False):
+        if not state_df.empty:
+            log = state_df[state_df["entry_signal"] | state_df["exit_signal"]][
+                ["Close", "upper", "lower", "entry_signal", "exit_signal"]
+            ].tail(12)
+            log["種別"] = log.apply(
+                lambda r: "🟢 ENTRY" if r["entry_signal"] else "🔴 EXIT", axis=1
+            )
+            st.dataframe(
+                log[["種別", "Close", "upper", "lower"]].rename(
+                    columns={"Close": "終値", "upper": "上限", "lower": "下限"}
+                ),
+                use_container_width=True,
+            )
+
+    with st.expander("🔍 データ透明性", expanded=False):
         st.markdown(
-            f"""
-| 項目 | 内容 |
-|------|------|
-| データプロバイダ | {DATA_SOURCE} |
-| 照会ティッカー | `{ticker}` |
-| 取得期間（API） | `{fetch_period}` |
-| 取得行数 | {len(close)} 行 |
-| チャート表示 | 直近 {chart_days} 営業日 |
-| SMA 窓 | {sma_window} 日 |
-| バックテスト先読み | {horizon_days} 営業日 |
-| 取得日時（UTC） | {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")} |
-            """
+            f"| 項目 | 値 |\n|---|---|\n"
+            f"| ソース | {DATA_SOURCE} |\n"
+            f"| ティッカー | `{ticker}` |\n"
+            f"| チャネル期間 | {channel_period} 日（前日までの高安） |\n"
+            f"| 取得 | `{fetch_period}` / {len(ohlcv)} 行 |\n"
+            f"| UTC | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} |"
         )
-        st.dataframe(
-            pd.DataFrame({"終値": close, f"SMA{sma_window}": sma}).tail(10),
-            use_container_width=True,
-        )
+        st.dataframe(ohlcv.tail(8), use_container_width=True)
 
     render_footer()
 
