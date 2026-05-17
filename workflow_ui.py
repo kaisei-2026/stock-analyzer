@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from ai_predictor import compute_buy_score, predict_direction, predict_price
+from ai_predictor import calculate_buy_score, predict_direction, predict_price
 from backtest_engine import run_backtest, equity_curve_for_plot
 from data_store import (
     add_knowledge,
@@ -17,8 +17,10 @@ from data_store import (
     list_knowledge,
     load_demo_account,
     reset_demo_account,
+    list_predictions,
 )
 from market_data import fetch_live_close, fetch_recommendation_closes
+from prediction_manager import record_prediction
 from recommendations import PICKS_FOR_SMALL_CAPITAL, unit_cost_yen
 
 
@@ -169,6 +171,10 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
             with st.spinner("AI分析中..."):
                 result = predict_direction(ohlcv)
             if result.get("ok", False):
+                # 履歴保存用にデータを整形
+                result["current_price"] = fetch_live_close(ticker)
+                record_prediction(ticker, {"direction": result})
+                
                 prob_up = result.get("prob_up", 50)
                 signal = result.get("signal", "➡ 方向感なし")
                 color = "#15803d" if prob_up > 55 else "#b91c1c" if prob_up < 45 else "#334155"
@@ -178,6 +184,7 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
                     st.metric("📈 上昇確率", f"{prob_up:.1f}%")
                 with col2:
                     st.metric("📉 下落確率", f"{result.get('prob_down', 50):.1f}%")
+                st.success("✅ 予測を履歴に保存しました。下部の履歴セクションで検証結果を確認できます。")
             else:
                 st.error(f"予測エラー: {result.get('error', '不明なエラー')}")
 
@@ -194,6 +201,9 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
             with st.spinner("シミュレーション中..."):
                 result = predict_price(ohlcv, forecast_days=forecast_days)
             if result.get("ok", False):
+                # 履歴保存
+                record_prediction(ticker, {"price": result})
+                
                 current_price = result.get("current_price", 0)
                 predicted_price = result.get("predicted_price", 0)
                 change_pct = ((predicted_price - current_price) / current_price * 100) if current_price > 0 else 0
@@ -206,6 +216,7 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
                 with col3:
                     color = "🟢" if change_pct > 0 else "🔴" if change_pct < 0 else "⚪"
                     st.metric("変化率", f"{color} {change_pct:+.2f}%")
+                st.success("✅ 予測を履歴に保存しました。")
             else:
                 st.error(f"予測エラー: {result.get('error', '不明なエラー')}")
 
@@ -213,15 +224,38 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
         st.markdown("### 総合買いスコア")
         if st.button("🎯 買いスコアを計算", type="primary", key="run_score"):
             with st.spinner("スコア計算中..."):
-                result = compute_buy_score(ohlcv)
+                result = calculate_buy_score(ohlcv)
             if result.get("ok", False):
                 score = result.get("score", 0)
-                rating = result.get("rating", "不明")
                 color = "#15803d" if score >= 70 else "#f59e0b" if score >= 50 else "#b91c1c"
-                st.markdown(f"<h2 style='color: {color}; text-align: center;'>スコア: {score:.0f}/100</h2>", unsafe_allow_html=True)
-                st.markdown(f"<h3 style='color: {color}; text-align: center;'>{rating}</h3>", unsafe_allow_html=True)
+                st.markdown(f"<h2 style='color: {color}; text-align: center;'>スコア: {score:.1f}/100</h2>", unsafe_allow_html=True)
+                
+                # 判定メッセージ
+                if score >= 80: st.success("🚀 **非常に強い買いシグナル**")
+                elif score >= 65: st.info("📈 **買い検討**")
+                elif score <= 35: st.error("📉 **売り検討 / 見送り**")
+                else: st.warning("➡ **様子見**")
             else:
                 st.error(f"スコア計算エラー: {result.get('error', '不明なエラー')}")
+
+    # 予測履歴の表示セクション
+    st.markdown("---")
+    st.markdown(f"#### 📜 {ticker} の予測履歴と検証結果")
+    all_preds = list_predictions()
+    ticker_preds = [p for p in all_preds if p['ticker'] == ticker]
+    
+    if ticker_preds:
+        df_preds = pd.DataFrame(ticker_preds)
+        # 表示用に整形
+        df_preds['開始価格'] = df_preds['start_price'].map('¥{:,.1f}'.format)
+        df_preds['予測値'] = df_preds.apply(lambda x: f"{x['predicted']:.1f}%" if x['type'] == 'direction' else f"¥{x['predicted']:,.1f}", axis=1)
+        df_preds['目標日'] = df_preds['target_date']
+        df_preds['結果'] = df_preds.apply(lambda x: "✅ 正解" if x['validated'] and x['is_correct'] else ("❌ 不正解" if x['validated'] else "⏳ 検証待ち"), axis=1)
+        df_preds['最終価格'] = df_preds['actual_end_price'].apply(lambda x: f"¥{x:,.1f}" if pd.notnull(x) else "-")
+        
+        st.dataframe(df_preds[['type', '目標日', '開始価格', '予測値', '最終価格', '結果']], use_container_width=True, hide_index=True)
+    else:
+        st.info("この銘柄の予測履歴はまだありません。上のボタンから予測を実行してください。")
 
 
 def render_demo_trade(ticker: str, planning_cash: float) -> None:

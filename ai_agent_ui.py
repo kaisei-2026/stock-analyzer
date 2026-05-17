@@ -123,12 +123,10 @@ def render_ai_agent_dashboard() -> None:
                 if remaining.total_seconds() > 0:
                     minutes = int(remaining.total_seconds() // 60)
                     seconds = int(remaining.total_seconds() % 60)
-                    st.warning(f"⏳ **{minutes}分 {seconds}秒後** に次のサイクルが自動実行されます。")
-                    
-                    # リアルタイムカウントダウン（JavaScriptが動かない場合の予備としてテキストも表示）
+                    # リアルタイムカウントダウン
                     countdown_html = f"""
-                    <div id="countdown_v2" style="font-size: 20px; font-weight: bold; padding: 15px; background-color: #e3f2fd; border-radius: 10px; text-align: center; border: 2px solid #2196f3; color: #0d47a1;">
-                        残り {minutes}分 {seconds}秒
+                    <div id="countdown_v2" style="font-size: 28px; font-weight: bold; padding: 20px; background-color: #f0f7ff; border-radius: 15px; text-align: center; border: 3px solid #007bff; color: #0056b3; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin: 10px 0;">
+                        ⏳ 残り {minutes}分 {seconds}秒
                     </div>
                     <script>
                     (function() {{
