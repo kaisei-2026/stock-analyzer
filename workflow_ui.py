@@ -160,11 +160,18 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
         if st.button("🔮 方向予測を実行", type="primary", key="run_dir_pred"):
             with st.spinner("AI分析中..."):
                 result = predict_direction(ohlcv)
-            if result["ok"]:
-                prob = result["up_probability"]
-                label = result["label"]
-                color = "#15803d" if prob > 0.55 else "#b91c1c" if prob < 0.45 else "#334155"
-                st.markdown(f"<h2 style='color: {color}; text-align: center;'>{label}</h2>", unsafe_allow_html=True)
+            if result.get("ok", False):
+                prob_up = result.get("prob_up", 50)
+                signal = result.get("signal", "➡ 方向感なし")
+                color = "#15803d" if prob_up > 55 else "#b91c1c" if prob_up < 45 else "#334155"
+                st.markdown(f"<h2 style='color: {color}; text-align: center;'>{signal}</h2>", unsafe_allow_html=True)
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("📈 上昇確率", f"{prob_up:.1f}%")
+                with col2:
+                    st.metric("📉 下落確率", f"{result.get('prob_down', 50):.1f}%")
+            else:
+                st.error(f"予測エラー: {result.get('error', '不明なエラー')}")
 
     with ai_tab2:
         st.markdown("### 株価数値予測（何円になる？）")
@@ -177,28 +184,39 @@ def render_ai_prediction_tab(ticker: str, ohlcv: pd.DataFrame) -> None:
 
         if st.button("📊 株価予測を実行", type="primary", key="run_price_pred"):
             with st.spinner("シミュレーション中..."):
-                result = predict_price(ohlcv, days=forecast_days)
-            if result["ok"]:
-                current = result["current_price"]
-                predicted = result["predicted_price"]
-                ret_pct = result["predicted_return_pct"]
-                lower = result["lower_bound"]
-                upper = result["upper_bound"]
+                result = predict_price(ohlcv, forecast_days=forecast_days)
+            if result.get("ok", False):
+                current_price = result.get("current_price", 0)
+                predicted_price = result.get("predicted_price", 0)
+                change_pct = ((predicted_price - current_price) / current_price * 100) if current_price > 0 else 0
                 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("現在の株価", f"{current:,.1f} 円")
-                c2.metric(f"{forecast_days}日後予測", f"{predicted:,.1f} 円", delta=f"{ret_pct:+.1f}%")
-                c3.metric("90%信頼区間", f"{lower:,.0f}〜{upper:,.0f} 円")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("現在の株価", f"¥{current_price:.0f}")
+                with col2:
+                    st.metric(f"{forecast_days}日後の予測", f"¥{predicted_price:.0f}")
+                with col3:
+                    color = "🟢" if change_pct > 0 else "🔴" if change_pct < 0 else "⚪"
+                    st.metric("変化率", f"{color} {change_pct:+.2f}%")
+            else:
+                st.error(f"予測エラー: {result.get('error', '不明なエラー')}")
 
     with ai_tab3:
         st.markdown("### 総合買いスコア")
         if st.button("🎯 買いスコアを計算", type="primary", key="run_score"):
-            result = compute_buy_score(ohlcv)
-            if result["ok"]:
-                st.metric("買いスコア", f"{result['score']} 点", delta=result["grade"])
+            with st.spinner("スコア計算中..."):
+                result = compute_buy_score(ohlcv)
+            if result.get("ok", False):
+                score = result.get("score", 0)
+                rating = result.get("rating", "不明")
+                color = "#15803d" if score >= 70 else "#f59e0b" if score >= 50 else "#b91c1c"
+                st.markdown(f"<h2 style='color: {color}; text-align: center;'>スコア: {score:.0f}/100</h2>", unsafe_allow_html=True)
+                st.markdown(f"<h3 style='color: {color}; text-align: center;'>{rating}</h3>", unsafe_allow_html=True)
+            else:
+                st.error(f"スコア計算エラー: {result.get('error', '不明なエラー')}")
 
 
-def render_demo_trade(ticker: str, planning_cash: float, auto_refresh: bool = False, refresh_sec: int = 60) -> None:
+def render_demo_trade(ticker: str, planning_cash: float) -> None:
     st.markdown(f"## 🛒 {ticker} のデモトレード")
     account = load_demo_account()
     st.metric("余力現金", f"¥{account['cash']:,.0f}")

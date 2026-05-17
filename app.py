@@ -512,8 +512,6 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
         render_demo_trade(
             ticker,
             float(planning_cash),
-            auto_refresh=demo_auto,
-            refresh_sec=int(demo_refresh_sec),
         )
 
     with tab_ai_agent:
