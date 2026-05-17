@@ -238,10 +238,16 @@ def load_ai_agent() -> dict:
         save_ai_agent(agent)
     return agent
 
+# エイリアス
+get_ai_agent_stats = load_ai_agent
+
 
 def save_ai_agent(agent: dict) -> None:
     agent["updated"] = _now_iso()
     _save_json(AI_AGENT_FILE, agent)
+
+# エイリアス
+save_ai_agent_stats = save_ai_agent
 
 
 def reset_ai_agent(initial_cash: float = 300_000.0) -> dict:
@@ -251,6 +257,9 @@ def reset_ai_agent(initial_cash: float = 300_000.0) -> dict:
     new_agent["reset_count"] = reset_count
     save_ai_agent(new_agent)
     return new_agent
+
+# エイリアス
+reset_ai_agent_stats = reset_ai_agent
 
 
 # --- 予測履歴 (Prediction History) ---
