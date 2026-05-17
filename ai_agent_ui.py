@@ -63,6 +63,9 @@ def render_ai_agent_dashboard() -> None:
         else:
             st.info("監視銘柄がまだ登録されていません。")
 
+    # データの読み込みを先に行う
+    agent_stats = get_ai_agent_stats()
+
     # 自動リロード機能（カウントダウンが0になったらリロード）
     if "last_run_time" not in st.session_state:
         st.session_state.last_run_time = agent_stats.get('last_run')
@@ -100,8 +103,6 @@ def render_ai_agent_dashboard() -> None:
 
     with col2:
         # 2. AI運用ステータス
-        agent_stats = get_ai_agent_stats()
-        
         st.markdown("#### 💰 AI運用ステータス")
         c1, c2, c3 = st.columns(3)
         c1.metric("現在の資産", f"¥{agent_stats['current_cash']:,.0f}")
