@@ -6,7 +6,7 @@ import time
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timezone
-from data_store import load_ai_agent, save_ai_agent, reset_ai_agent, add_knowledge
+from data_store import load_ai_agent, save_ai_agent, reset_ai_agent, add_knowledge, get_watch_tickers_list
 from ai_predictor import run_all_predictions
 from market_data import fetch_live_close
 
@@ -22,9 +22,14 @@ def run_ai_agent_cycle() -> dict:
         if (now - last_run).total_seconds() < 3600:
             return {"ok": False, "message": "APIリミッター作動中。次回の実行までお待ちください。"}
 
-    # 1. 銘柄発掘（本来は外部検索等を行うが、ここでは注目の日本株リストから選択）
-    # ※ 将来的にはGoogle/Yahooニュースのスクレイピング結果をここに統合
-    hot_tickers = ["8306.T", "7203.T", "9984.T", "6758.T", "4063.T", "8035.T", "9101.T"]
+    # 1. 銘柄発掘
+    # ユーザーが設定した監視銘柄があればそれを優先、なければデフォルト銘柄を使用
+    user_tickers = get_watch_tickers_list()
+    if user_tickers:
+        hot_tickers = user_tickers
+    else:
+        # デフォルト銘柄（ユーザーが何も設定していない場合）
+        hot_tickers = ["8306.T", "7203.T", "9984.T", "6758.T", "4063.T", "8035.T", "9101.T"]
     
     log_entry = {"time": now.isoformat(), "actions": []}
     

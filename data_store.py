@@ -14,6 +14,7 @@ KNOWLEDGE_FILE = DATA_DIR / "knowledge.json"
 DEMO_ACCOUNT_FILE = DATA_DIR / "demo_account.json"
 AI_AGENT_FILE = DATA_DIR / "ai_agent.json"
 PREDICTION_HISTORY_FILE = DATA_DIR / "prediction_history.json"
+WATCH_TICKERS_FILE = DATA_DIR / "watch_tickers.json"
 CACHE_DIR = DATA_DIR / "ohlcv_cache"
 
 
@@ -278,6 +279,65 @@ def add_prediction(
 
 def update_predictions(preds: list[dict]) -> None:
     _save_json(PREDICTION_HISTORY_FILE, preds)
+
+
+# --- 監視銘柄 (Watch Tickers) ---
+
+
+def list_watch_tickers() -> list[dict]:
+    """ユーザーが設定した監視銘柄リストを取得"""
+    tickers = _load_json(WATCH_TICKERS_FILE, [])
+    return tickers
+
+
+def add_watch_ticker(ticker: str, name: str = "", notes: str = "") -> dict:
+    """監視銘柄を追加"""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return {"ok": False, "message": "銘柄コードが空です"}
+    
+    # 4桁数字なら .T を付与
+    if ticker.isdigit() and len(ticker) == 4:
+        ticker = f"{ticker}.T"
+    
+    tickers = list_watch_tickers()
+    
+    # 重複チェック
+    if any(t["ticker"] == ticker for t in tickers):
+        return {"ok": False, "message": f"{ticker} は既に登録されています"}
+    
+    item = {
+        "id": str(uuid4())[:8],
+        "ticker": ticker,
+        "name": name.strip(),
+        "notes": notes.strip(),
+        "added_date": _now_iso(),
+    }
+    tickers.append(item)
+    _save_json(WATCH_TICKERS_FILE, tickers)
+    return {"ok": True, "message": f"{ticker} を監視銘柄に追加しました", "item": item}
+
+
+def delete_watch_ticker(ticker: str) -> dict:
+    """監視銘柄を削除"""
+    ticker = ticker.strip().upper()
+    if ticker.isdigit() and len(ticker) == 4:
+        ticker = f"{ticker}.T"
+    
+    tickers = list_watch_tickers()
+    new_tickers = [t for t in tickers if t["ticker"] != ticker]
+    
+    if len(new_tickers) == len(tickers):
+        return {"ok": False, "message": f"{ticker} が見つかりません"}
+    
+    _save_json(WATCH_TICKERS_FILE, new_tickers)
+    return {"ok": True, "message": f"{ticker} を監視銘柄から削除しました"}
+
+
+def get_watch_tickers_list() -> list[str]:
+    """AIが監視する銘柄コードのリストを取得（ティッカーのみ）"""
+    tickers = list_watch_tickers()
+    return [t["ticker"] for t in tickers]
 
 
 # --- OHLCV キャッシュ ---
