@@ -11,14 +11,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-from backtest_engine import (
-    LIBRARY_DOCS,
-    LIBRARY_GITHUB,
-    LIBRARY_NAME,
-    equity_curve_for_plot,
-    normalize_ohlcv,
-    run_backtest,
-)
+from backtest_engine import normalize_ohlcv
 from recommendations import (
     DEFAULT_BACKTEST_CASH,
     DEFAULT_PLANNING_CASH,
@@ -27,6 +20,15 @@ from recommendations import (
     REFERENCE_LINKS,
     affordability_label,
     unit_cost_yen,
+)
+from theme import COLORS, inject_theme, style_figure
+from workflow_ui import (
+    render_backtest_section,
+    render_data_collection,
+    render_demo_trade,
+    render_investment_ideas,
+    render_knowledge,
+    render_workflow_checklist,
 )
 
 # ---------------------------------------------------------------------------
@@ -52,29 +54,12 @@ SIMULATION_OPTIONS = ("1年", "2年")
 SIMULATION_FETCH = {"1年": "1y", "2年": "2y"}
 SIMULATION_TRADING_DAYS = {"1年": 252, "2年": 504}
 
-# チャート・UI テーマ
-COLORS = {
-    "bg": "#0b0f19",
-    "panel": "#121826",
-    "grid": "#1e293b",
-    "text": "#e2e8f0",
-    "up": "#22d3ee",
-    "down": "#f43f5e",
-    "channel_hi": "#a78bfa",
-    "channel_lo": "#fb923c",
-    "channel_fill": "rgba(167, 139, 250, 0.08)",
-    "buy": "#4ade80",
-    "sell": "#fb7185",
-    "equity": "#34d399",
-    "benchmark": "#64748b",
-}
-
-CHART_LAYOUT = dict(
-    paper_bgcolor=COLORS["bg"],
-    plot_bgcolor=COLORS["panel"],
-    font=dict(color=COLORS["text"], family="Segoe UI, Hiragino Sans, sans-serif"),
-    xaxis=dict(gridcolor=COLORS["grid"], zerolinecolor=COLORS["grid"]),
-    yaxis=dict(gridcolor=COLORS["grid"], zerolinecolor=COLORS["grid"]),
+WORKFLOW_PAGES = (
+    "② 分析＆バックテスト",
+    "① 投資アイデア",
+    "③ デモトレード",
+    "⑤ 知見の蓄積",
+    "データ収集",
 )
 
 
@@ -232,11 +217,6 @@ def run_breakout_backtest(ohlcv: pd.DataFrame, channel_period: int, horizon_days
 # ---------------------------------------------------------------------------
 
 
-def style_figure(fig: go.Figure, height: int = 520) -> go.Figure:
-    fig.update_layout(**CHART_LAYOUT, height=height, hovermode="x unified")
-    return fig
-
-
 def build_candlestick_chart(
     ohlcv: pd.DataFrame,
     channel_period: int,
@@ -304,7 +284,7 @@ def build_candlestick_chart(
                 y=buy_df["Close"],
                 mode="markers",
                 name="エントリー（上抜け）",
-                marker=dict(symbol="triangle-up", size=14, color=COLORS["buy"], line=dict(width=1, color="white")),
+                marker=dict(symbol="triangle-up", size=14, color=COLORS["buy"], line=dict(width=1, color="#ffffff")),
             ),
             row=1,
             col=1,
@@ -316,7 +296,7 @@ def build_candlestick_chart(
                 y=sell_df["Close"],
                 mode="markers",
                 name="イグジット（下抜け）",
-                marker=dict(symbol="triangle-down", size=14, color=COLORS["sell"], line=dict(width=1, color="white")),
+                marker=dict(symbol="triangle-down", size=14, color=COLORS["sell"], line=dict(width=1, color="#ffffff")),
             ),
             row=1,
             col=1,
@@ -352,7 +332,7 @@ def build_equity_chart(df: pd.DataFrame, ticker: str, sim_label: str) -> go.Figu
             name="ブレイクアウト戦略",
             line=dict(color=COLORS["equity"], width=2.5),
             fill="tozeroy",
-            fillcolor="rgba(52, 211, 153, 0.12)",
+            fillcolor="rgba(3, 105, 161, 0.08)",
         )
     )
     fig.add_trace(
@@ -375,48 +355,6 @@ def build_equity_chart(df: pd.DataFrame, ticker: str, sim_label: str) -> go.Figu
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-
-
-def inject_theme() -> None:
-    st.markdown(
-        """
-        <style>
-        .stApp { background: linear-gradient(160deg, #0b0f19 0%, #111827 50%, #0f172a 100%); }
-        [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #0f172a 0%, #1e1b4b 100%);
-            border-right: 1px solid #334155;
-        }
-        h1 {
-            background: linear-gradient(90deg, #22d3ee, #a78bfa);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            font-weight: 800 !important;
-        }
-        [data-testid="stMetric"] {
-            background: rgba(18, 24, 38, 0.85);
-            border: 1px solid #334155;
-            border-radius: 12px;
-            padding: 12px 16px;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.35);
-        }
-        [data-testid="stMetricValue"] { color: #f1f5f9 !important; }
-        .signal-banner {
-            padding: 16px 20px;
-            border-radius: 12px;
-            border: 1px solid #475569;
-            background: rgba(30, 41, 59, 0.9);
-            margin-bottom: 1rem;
-        }
-        .signal-banner strong { color: #22d3ee; font-size: 1.1rem; }
-        div[data-testid="stExpander"] {
-            background: rgba(18, 24, 38, 0.6);
-            border-radius: 10px;
-            border: 1px solid #334155;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def render_footer() -> None:
@@ -481,9 +419,11 @@ def main() -> None:
     )
     inject_theme()
     st.title("Breakout Trader")
-    st.caption("ローソク足 × ドンチャンチャネルブレイクアウト ｜ バックテスト付き")
+    st.caption("投資ワークフロー: アイデア → 分析 → デモトレード → 知見（本番取引は非対応）")
 
     with st.sidebar:
+        page = st.radio("ワークフロー", WORKFLOW_PAGES, index=0)
+        st.markdown("---")
         with st.expander("🚀 起動方法", expanded=True):
             st.markdown(
                 """
@@ -565,7 +505,12 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
         return
 
     jp_note = "（4桁 → .T 付与）" if JP_TICKER_PATTERN.fullmatch(ticker_input.strip()) else ""
-    st.markdown(f"**{ticker}** {jp_note}")
+
+    with st.expander("ワークフロー対応状況", expanded=False):
+        render_workflow_checklist()
+
+    if page != "② 分析＆バックテスト":
+        st.markdown(f"**対象銘柄:** `{ticker}` {jp_note}")
 
     try:
         with st.spinner("マーケットデータ取得中…"):
@@ -581,6 +526,29 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
         render_footer()
         return
 
+    if page == "データ収集":
+        render_data_collection(ticker, ohlcv, fetch_period)
+        render_footer()
+        return
+
+    if page == "① 投資アイデア":
+        render_investment_ideas(ticker)
+        render_footer()
+        return
+
+    if page == "③ デモトレード":
+        render_demo_trade(ticker, float(ohlcv["Close"].iloc[-1]), float(planning_cash))
+        render_footer()
+        return
+
+    if page == "⑤ 知見の蓄積":
+        snap = st.session_state.get("last_backtest_metrics")
+        render_knowledge(ticker, snap)
+        render_footer()
+        return
+
+    # --- ② 分析＆バックテスト ---
+    st.markdown(f"**{ticker}** {jp_note}")
     state_df = run_channel_state_machine(ohlcv, channel_period)
     bt = run_breakout_backtest(ohlcv, channel_period, horizon_days)
     latest = ohlcv.iloc[-1]
@@ -665,87 +633,24 @@ CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
             else:
                 st.write("データ不足")
 
-    # --- バックテスト（backtesting.py） ---
-    st.subheader(f"💰 バックテスト（過去{sim_label}）")
-    st.caption(
-        f"エンジン: **[{LIBRARY_NAME}]({LIBRARY_GITHUB})** ｜ "
-        f"[API ドキュメント]({LIBRARY_DOCS}) ｜ "
-        f"チャネル {channel_period} 日 ｜ 手数料 {commission_pct:.3f}%（片道）"
-    )
-
     try:
         sim_raw = fetch_price_history(ticker, SIMULATION_FETCH[sim_label])
         sim_ohlcv = trim_ohlcv(extract_ohlcv(sim_raw), SIMULATION_TRADING_DAYS[sim_label])
-        commission = float(commission_pct) / 100.0
-        port_hist = run_backtest(
+        metrics = render_backtest_section(
+            ticker,
+            sim_label,
+            channel_period,
+            commission_pct,
+            backtest_cash,
+            planning_cash,
+            unit_yen,
             sim_ohlcv,
-            channel_period=channel_period,
-            cash=float(backtest_cash),
-            commission=commission,
+            build_equity_chart,
         )
-        port_plan = run_backtest(
-            sim_ohlcv,
-            channel_period=channel_period,
-            cash=float(planning_cash),
-            commission=commission,
-        )
+        if metrics:
+            st.session_state["last_backtest_metrics"] = metrics
     except Exception as exc:
         st.error(f"バックテスト失敗: {exc}")
-        port_hist = {"ok": False, "error": str(exc)}
-        port_plan = {"ok": False}
-
-    tab_hist, tab_plan = st.tabs(
-        [
-            f"過去検証（{backtest_cash:,.0f} 円・成績の見比べ用）",
-            f"10万円シミュレーション（{planning_cash:,.0f} 円）",
-        ]
-    )
-
-    def render_backtest_panel(port: dict, cash_label: str) -> None:
-        if not port.get("ok"):
-            st.warning(port.get("error", "データ不足"))
-            return
-        beats_bh = port["final_strategy"] >= port["final_buy_hold"]
-        s1, s2, s3, s4, s5 = st.columns(5)
-        s1.metric("最終総資産", f"{port['final_strategy']:,.0f} 円", f"{port['pnl_strategy']:+,.0f} 円")
-        s2.metric("リターン", f"{port['return_strategy_pct']:+.2f}%")
-        s3.metric("買い持ちリターン", f"{port['return_buy_hold_pct']:+.2f}%")
-        s4.metric("最大DD", f"{port['max_drawdown_pct']:.2f}%")
-        s5.metric("シャープ", f"{port['sharpe']:.2f}")
-        diff = port["final_strategy"] - port["final_buy_hold"]
-        verdict = "✅ 買い持ちを上回る" if beats_bh else "⚠️ 買い持ちに劣る"
-        st.info(
-            f"{verdict}（差額 {diff:+,.0f} 円）｜ 取引 {port['num_trades']} 回 ｜ "
-            f"勝率 {port['win_rate_pct']:.1f}% ｜ 初期 {cash_label}"
-        )
-        plot_df = equity_curve_for_plot(port)
-        if not plot_df.empty:
-            st.plotly_chart(build_equity_chart(plot_df, ticker, sim_label), use_container_width=True)
-        with st.expander("📊 メトリクス一覧"):
-            st.dataframe(
-                pd.DataFrame([{"指標": k, "値": v} for k, v in port["metrics"].items()]),
-                use_container_width=True,
-                hide_index=True,
-            )
-        with st.expander("📒 約定履歴"):
-            if not port["trades"].empty:
-                st.dataframe(port["trades"], use_container_width=True)
-            else:
-                st.write("約定なし")
-
-    with tab_hist:
-        st.markdown(
-            "過去のチャート検証用です。**1,000円など少額でもリターン%のイメージは同じ**ですが、"
-            " 株数は整数のため金額は変わります。"
-        )
-        render_backtest_panel(port_hist, f"{backtest_cash:,.0f} 円")
-
-    with tab_plan:
-        st.markdown(
-            f"**これから {planning_cash:,.0f} 円で同じ戦略を運用した場合**のシミュレーションです。"
-            f" 現在の1単元は約 **{unit_yen:,.0f} 円**。"
-        )
-        render_backtest_panel(port_plan, f"{planning_cash:,.0f} 円")
 
     # --- 直近トレードログ ---
     with st.expander("📋 直近のエントリー / イグジット", expanded=False):

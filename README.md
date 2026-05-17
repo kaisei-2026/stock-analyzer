@@ -34,6 +34,18 @@ python run_backtest.py --ticker 7203.T --period 2y --channel 20
 python run_backtest.py --csv your_ohlcv.csv --cash 100000 --commission 0.1
 ```
 
+## ワークフロー（サイドバーのメニュー）
+
+| メニュー | 内容 |
+|---------|------|
+| ② 分析＆バックテスト | ローソク足・チャネル・backtesting.py |
+| ① 投資アイデア | 仮説メモの保存（`data/investment_ideas.json`） |
+| ③ デモトレード | 紙トレード口座（`data/demo_account.json`）※本番口座には非接続 |
+| ⑤ 知見の蓄積 | 学びのメモ（`data/knowledge.json`） |
+| データ収集 | CSV 保存・ダウンロード |
+
+**意図的に未実装:** ④ 本運用（証券会社への発注）、取引環境構築（API 連携）
+
 ## 資金の考え方（アプリ内）
 
 | 用途 | デフォルト | 説明 |
