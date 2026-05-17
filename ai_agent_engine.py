@@ -47,10 +47,10 @@ def run_ai_agent_cycle() -> dict:
             # 3. 売買判断
             # スコア75以上なら購入検討
             if buy_score >= 75 and ticker not in agent["positions"]:
-                # 資金の20%までを1銘柄に投入
+                # 資金の20%までを1銘柄に投入（1株単位）
                 budget = agent["cash"] * 0.2
                 shares = int(budget // current_price)
-                if shares >= 100: # 日本株は100株単位
+                if shares >= 1:  # 1株単位で購入可能
                     cost = shares * current_price
                     agent["cash"] -= cost
                     agent["positions"][ticker] = {
@@ -68,7 +68,8 @@ def run_ai_agent_cycle() -> dict:
                 proceeds = pos["shares"] * current_price
                 agent["cash"] += proceeds
                 profit = proceeds - (pos["shares"] * pos["entry_price"])
-                action = f"SELL {ticker}: {pos['shares']}株 @ {current_price:,.1f}円 (損益: {profit:+,.0f}円)"
+                profit_pct = (profit / (pos["shares"] * pos["entry_price"])) * 100 if pos["shares"] * pos["entry_price"] > 0 else 0
+                action = f"SELL {ticker}: {pos['shares']}株 @ {current_price:,.1f}円 (損益: {profit:+,.0f}円, {profit_pct:+.1f}%)"
                 log_entry["actions"].append(action)
                 agent["history"].insert(0, {"time": now.isoformat(), "action": action, "ticker": ticker})
                 del agent["positions"][ticker]

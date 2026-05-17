@@ -119,7 +119,20 @@ def render_ai_agent_dashboard() -> None:
         
         st.markdown("#### 📈 ポートフォリオ")
         if agent_stats['positions']:
-            pos_df = pd.DataFrame(agent_stats['positions'])
+            pos_list = []
+            for ticker, pos in agent_stats['positions'].items():
+                current_price = pos.get('current_price', pos['entry_price'])
+                profit = (current_price - pos['entry_price']) * pos['shares']
+                profit_pct = ((current_price - pos['entry_price']) / pos['entry_price'] * 100) if pos['entry_price'] > 0 else 0
+                pos_list.append({
+                    '銘柄': ticker,
+                    '保有数': f"{pos['shares']}株",
+                    '取得価格': f"¥{pos['entry_price']:,.0f}",
+                    '現在価格': f"¥{current_price:,.0f}",
+                    '評価額': f"¥{current_price * pos['shares']:,.0f}",
+                    '損益': f"¥{profit:+,.0f} ({profit_pct:+.1f}%)"
+                })
+            pos_df = pd.DataFrame(pos_list)
             st.dataframe(pos_df, use_container_width=True, hide_index=True)
         else:
             st.info("現在、保有ポジションはありません。")
