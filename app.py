@@ -19,6 +19,15 @@ from backtest_engine import (
     normalize_ohlcv,
     run_backtest,
 )
+from recommendations import (
+    DEFAULT_BACKTEST_CASH,
+    DEFAULT_PLANNING_CASH,
+    LOT_SIZE,
+    PICKS_FOR_SMALL_CAPITAL,
+    REFERENCE_LINKS,
+    affordability_label,
+    unit_cost_yen,
+)
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -419,6 +428,50 @@ def fmt_date(idx) -> str:
     return idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_last_closes_jp(tickers: tuple[str, ...]) -> dict[str, float]:
+    """おすすめ銘柄の直近終値を取得（銘柄ごとに取得して精度を確保）。"""
+    closes: dict[str, float] = {}
+    for code in tickers:
+        sym = f"{code}.T" if not str(code).endswith(".T") else str(code)
+        try:
+            raw = yf.download(sym, period="5d", interval="1d", progress=False, auto_adjust=False)
+            if raw.empty:
+                raw = yf.Ticker(sym).history(period="5d", auto_adjust=False)
+            ohlcv = extract_ohlcv(raw)
+            if not ohlcv.empty:
+                closes[code] = float(ohlcv["Close"].iloc[-1])
+        except Exception:
+            continue
+    return closes
+
+
+def build_recommendations_table(capital: float) -> pd.DataFrame:
+    codes = tuple(p.ticker for p in PICKS_FOR_SMALL_CAPITAL)
+    closes = fetch_last_closes_jp(codes)
+    rows = []
+    for pick in PICKS_FOR_SMALL_CAPITAL:
+        close = closes.get(pick.ticker)
+        if close is None:
+            unit = None
+            label = "（株価取得失敗）"
+        else:
+            unit = unit_cost_yen(close)
+            label = affordability_label(close, capital)
+        rows.append(
+            {
+                "コード": pick.ticker,
+                "銘柄": pick.name,
+                "分類": pick.category,
+                "直近終値": f"{close:,.0f}" if close else "—",
+                f"1単元({LOT_SIZE}株)": f"{unit:,.0f}円" if unit else "—",
+                f"{capital/10000:.0f}万円での目安": label,
+                "メモ": pick.note,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Breakout Trader",
@@ -431,13 +484,52 @@ def main() -> None:
     st.caption("ローソク足 × ドンチャンチャネルブレイクアウト ｜ バックテスト付き")
 
     with st.sidebar:
+        with st.expander("🚀 起動方法", expanded=True):
+            st.markdown(
+                """
+1. ターミナルでこのフォルダへ移動  
+2. `pip install -r requirements.txt`  
+3. **`streamlit run app.py`**  
+4. ブラウザで `http://localhost:8501` を開く  
+
+CLI のみ: `python run_backtest.py --ticker 7203.T --period 1y`
+                """
+            )
+
         st.header("⚙ トレード設定")
-        ticker_input = st.text_input("銘柄コード", value="7203", help="4桁数字 → 自動で .T")
+
+        pick_labels = ["（自分で入力）"] + [
+            f"{p.ticker} {p.name}" for p in PICKS_FOR_SMALL_CAPITAL
+        ]
+        pick_choice = st.selectbox("おすすめから選ぶ（10万円向け）", pick_labels, index=0)
+        default_code = "8306" if pick_choice == "（自分で入力）" else pick_choice.split()[0]
+        ticker_input = st.text_input(
+            "銘柄コード",
+            value=default_code,
+            help="4桁数字 → 自動で .T ／ ETF は 1306 など",
+        )
+
         period_label = st.radio("チャネル期間（分析）", PERIOD_OPTIONS, index=2)
-        sim_label = st.radio("総資産シミュレーション", SIMULATION_OPTIONS, index=0)
-        initial_capital = st.number_input(
-            "初期資金（円）", min_value=10_000, max_value=1_000_000_000,
-            value=1_000_000, step=100_000, format="%d",
+        sim_label = st.radio("バックテスト期間", SIMULATION_OPTIONS, index=0)
+
+        st.markdown("**資金の使い分け**")
+        backtest_cash = st.number_input(
+            "過去バックテスト（検証用・円）",
+            min_value=100,
+            max_value=10_000_000,
+            value=DEFAULT_BACKTEST_CASH,
+            step=100,
+            format="%d",
+            help="成績比較用。1,000円など小さくても%は同じ目安になります。",
+        )
+        planning_cash = st.number_input(
+            "これから投資する想定（円）",
+            min_value=10_000,
+            max_value=10_000_000,
+            value=DEFAULT_PLANNING_CASH,
+            step=10_000,
+            format="%d",
+            help="10万円など、実際に使える資金でシミュレーションします。",
         )
         commission_pct = st.number_input(
             "片道手数料（%）",
@@ -456,6 +548,9 @@ def main() -> None:
             f"• 終値が下限を**下抜け** → イグジット\n\n"
             f"**データ:** {DATA_SOURCE}"
         )
+        with st.expander("📚 参考リンク（Qiita・公式）"):
+            for ref in REFERENCE_LINKS:
+                st.markdown(f"- [{ref['title']}]({ref['url']})（{ref['site']}）")
 
     ticker = normalize_ticker(ticker_input)
     cfg = PERIOD_CONFIG[period_label]
@@ -501,12 +596,33 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    unit_yen = unit_cost_yen(float(latest["Close"]))
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("直近終値", f"{latest['Close']:,.2f}")
-    c2.metric("チャネル上限", f"{bt.get('last_upper', 0):,.2f}")
-    c3.metric("チャネル下限", f"{bt.get('last_lower', 0):,.2f}")
-    c4.metric("上限まで", f"{bt.get('dist_to_upper_pct', 0):+.2f}%")
-    c5.metric("データ日", fmt_date(ohlcv.index[-1]))
+    c2.metric(f"1単元({LOT_SIZE}株)", f"{unit_yen:,.0f} 円")
+    c3.metric(
+        f"{planning_cash/10000:.0f}万円で",
+        "買付可" if unit_yen <= planning_cash else "単元不足",
+    )
+    c4.metric("チャネル上限", f"{bt.get('last_upper', 0):,.2f}")
+    c5.metric("チャネル下限", f"{bt.get('last_lower', 0):,.2f}")
+    c6.metric("データ日", fmt_date(ohlcv.index[-1]))
+
+    # --- おすすめ銘柄（10万円前後） ---
+    st.subheader(f"💡 おすすめ銘柄（{planning_cash/10000:.0f}万円・1単元目安）")
+    st.caption(
+        "流動性と単元の大きさを踏まえた**候補**です。推奨売買ではありません。"
+        " 最新株価で「1単元」が資金内か確認してから検討してください。"
+    )
+    with st.spinner("おすすめ銘柄の株価を確認中…"):
+        rec_df = build_recommendations_table(float(planning_cash))
+    st.dataframe(rec_df, use_container_width=True, hide_index=True)
+    affordable = rec_df[rec_df[f"{planning_cash/10000:.0f}万円での目安"].str.startswith("✅")]
+    if not affordable.empty:
+        st.success(
+            "資金内で1単元が買える候補: "
+            + "、".join(f"{r['コード']} {r['銘柄']}" for _, r in affordable.iterrows())
+        )
 
     # --- ローソク足チャート ---
     st.subheader("📈 ローソク足 & チャネル")
@@ -554,64 +670,82 @@ def main() -> None:
     st.caption(
         f"エンジン: **[{LIBRARY_NAME}]({LIBRARY_GITHUB})** ｜ "
         f"[API ドキュメント]({LIBRARY_DOCS}) ｜ "
-        f"初期 {initial_capital:,.0f} 円 ｜ チャネル {channel_period} 日 ｜ "
-        f"手数料 {commission_pct:.3f}%（片道）"
+        f"チャネル {channel_period} 日 ｜ 手数料 {commission_pct:.3f}%（片道）"
     )
 
     try:
         sim_raw = fetch_price_history(ticker, SIMULATION_FETCH[sim_label])
         sim_ohlcv = trim_ohlcv(extract_ohlcv(sim_raw), SIMULATION_TRADING_DAYS[sim_label])
-        port = run_backtest(
+        commission = float(commission_pct) / 100.0
+        port_hist = run_backtest(
             sim_ohlcv,
             channel_period=channel_period,
-            cash=float(initial_capital),
-            commission=float(commission_pct) / 100.0,
+            cash=float(backtest_cash),
+            commission=commission,
+        )
+        port_plan = run_backtest(
+            sim_ohlcv,
+            channel_period=channel_period,
+            cash=float(planning_cash),
+            commission=commission,
         )
     except Exception as exc:
         st.error(f"バックテスト失敗: {exc}")
-        port = {"ok": False, "error": str(exc)}
+        port_hist = {"ok": False, "error": str(exc)}
+        port_plan = {"ok": False}
 
-    if port.get("ok"):
+    tab_hist, tab_plan = st.tabs(
+        [
+            f"過去検証（{backtest_cash:,.0f} 円・成績の見比べ用）",
+            f"10万円シミュレーション（{planning_cash:,.0f} 円）",
+        ]
+    )
+
+    def render_backtest_panel(port: dict, cash_label: str) -> None:
+        if not port.get("ok"):
+            st.warning(port.get("error", "データ不足"))
+            return
         beats_bh = port["final_strategy"] >= port["final_buy_hold"]
         s1, s2, s3, s4, s5 = st.columns(5)
-        s1.metric(
-            "最終総資産（戦略）",
-            f"{port['final_strategy']:,.0f} 円",
-            f"{port['pnl_strategy']:+,.0f} 円",
-        )
-        s2.metric("リターン（戦略）", f"{port['return_strategy_pct']:+.2f}%")
+        s1.metric("最終総資産", f"{port['final_strategy']:,.0f} 円", f"{port['pnl_strategy']:+,.0f} 円")
+        s2.metric("リターン", f"{port['return_strategy_pct']:+.2f}%")
         s3.metric("買い持ちリターン", f"{port['return_buy_hold_pct']:+.2f}%")
-        s4.metric("最大ドローダウン", f"{port['max_drawdown_pct']:.2f}%")
-        s5.metric("シャープレシオ", f"{port['sharpe']:.2f}")
-
+        s4.metric("最大DD", f"{port['max_drawdown_pct']:.2f}%")
+        s5.metric("シャープ", f"{port['sharpe']:.2f}")
         diff = port["final_strategy"] - port["final_buy_hold"]
         verdict = "✅ 買い持ちを上回る" if beats_bh else "⚠️ 買い持ちに劣る"
         st.info(
-            f"{verdict}（差額 {diff:+,.0f} 円）｜ "
-            f"取引回数 {port['num_trades']} ｜ 勝率 {port['win_rate_pct']:.1f}% ｜ "
-            f"PF {port['profit_factor']:.2f}"
+            f"{verdict}（差額 {diff:+,.0f} 円）｜ 取引 {port['num_trades']} 回 ｜ "
+            f"勝率 {port['win_rate_pct']:.1f}% ｜ 初期 {cash_label}"
         )
-
         plot_df = equity_curve_for_plot(port)
         if not plot_df.empty:
-            st.plotly_chart(
-                build_equity_chart(plot_df, ticker, sim_label),
+            st.plotly_chart(build_equity_chart(plot_df, ticker, sim_label), use_container_width=True)
+        with st.expander("📊 メトリクス一覧"):
+            st.dataframe(
+                pd.DataFrame([{"指標": k, "値": v} for k, v in port["metrics"].items()]),
                 use_container_width=True,
+                hide_index=True,
             )
-
-        with st.expander("📊 backtesting.py 算出メトリクス（全項目）", expanded=False):
-            metrics_df = pd.DataFrame(
-                [{"指標": k, "値": v} for k, v in port["metrics"].items()]
-            )
-            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-
-        with st.expander("📒 約定履歴（_trades）", expanded=False):
+        with st.expander("📒 約定履歴"):
             if not port["trades"].empty:
                 st.dataframe(port["trades"], use_container_width=True)
             else:
                 st.write("約定なし")
-    else:
-        st.warning(port.get("error", "バックテスト用データが不足しています。"))
+
+    with tab_hist:
+        st.markdown(
+            "過去のチャート検証用です。**1,000円など少額でもリターン%のイメージは同じ**ですが、"
+            " 株数は整数のため金額は変わります。"
+        )
+        render_backtest_panel(port_hist, f"{backtest_cash:,.0f} 円")
+
+    with tab_plan:
+        st.markdown(
+            f"**これから {planning_cash:,.0f} 円で同じ戦略を運用した場合**のシミュレーションです。"
+            f" 現在の1単元は約 **{unit_yen:,.0f} 円**。"
+        )
+        render_backtest_panel(port_plan, f"{planning_cash:,.0f} 円")
 
     # --- 直近トレードログ ---
     with st.expander("📋 直近のエントリー / イグジット", expanded=False):
