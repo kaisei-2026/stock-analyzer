@@ -218,19 +218,77 @@ def render_ai_agent_dashboard() -> None:
     if agent_stats['positions']:
         pos_list = []
         for ticker, pos in agent_stats['positions'].items():
-            current_price = pos.get('current_price', pos['entry_price'])
+            # 最新価格を取得
+            from market_data import fetch_live_close
+            current_price = fetch_live_close(ticker) or pos['entry_price']
+            
             profit = (current_price - pos['entry_price']) * pos['shares']
             profit_pct = ((current_price - pos['entry_price']) / pos['entry_price'] * 100) if pos['entry_price'] > 0 else 0
             pos_list.append({
                 '銘柄': ticker,
-                '保有数': f"{pos['shares']}株",
-                '取得価格': f"¥{pos['entry_price']:,.0f}",
-                '現在価格': f"¥{current_price:,.0f}",
-                '評価額': f"¥{current_price * pos['shares']:,.0f}",
-                '損益': f"¥{profit:+,.0f} ({profit_pct:+.1f}%)"
+                '保有数': pos['shares'],
+                '取得価格': pos['entry_price'],
+                '現在価格': current_price,
+                '評価額': current_price * pos['shares'],
+                '損益': profit,
+                '損益率': profit_pct
             })
+        
         pos_df = pd.DataFrame(pos_list)
-        st.dataframe(pos_df, use_container_width=True, hide_index=True)
+        # 表示用にフォーマット
+        display_df = pos_df.copy()
+        display_df['取得価格'] = display_df['取得価格'].map('¥{:,.0f}'.format)
+        display_df['現在価格'] = display_df['現在価格'].map('¥{:,.0f}'.format)
+        display_df['評価額'] = display_df['評価額'].map('¥{:,.0f}'.format)
+        display_df['損益'] = display_df.apply(lambda x: f"¥{x['損益']:+,.0f} ({x['損益率']:+.1f}%)", axis=1)
+        st.dataframe(display_df[['銘柄', '保有数', '取得価格', '現在価格', '評価額', '損益']], use_container_width=True, hide_index=True)
+
+        # 個別銘柄チャート
+        st.markdown("#### 🔍 個別銘柄の詳細チャート（購入時からの推移）")
+        selected_ticker = st.selectbox("詳細を表示する銘柄を選択", options=pos_df['銘柄'].tolist())
+        
+        if selected_ticker:
+            import yfinance as yf
+            pos_info = agent_stats['positions'][selected_ticker]
+            entry_date = datetime.fromisoformat(pos_info['entry_date'])
+            
+            # 購入日の前日から現在までのデータを取得
+            start_date = (entry_date - timedelta(days=5)).strftime('%Y-%m-%d')
+            df_ticker = yf.download(selected_ticker, start=start_date, progress=False)
+            
+            if not df_ticker.empty:
+                df_ticker.columns = df_ticker.columns.droplevel(1) if isinstance(df_ticker.columns, pd.MultiIndex) else df_ticker.columns
+                
+                fig_ticker = go.Figure()
+                # 株価チャート
+                fig_ticker.add_trace(go.Scatter(
+                    x=df_ticker.index, y=df_ticker['Close'],
+                    mode='lines', name='株価', line=dict(color='#1f77b4')
+                ))
+                # 購入ライン
+                fig_ticker.add_hline(
+                    y=pos_info['entry_price'], 
+                    line_dash="dash", line_color="red",
+                    annotation_text=f"購入価格: ¥{pos_info['entry_price']:,.0f}",
+                    annotation_position="top left"
+                )
+                # 購入点
+                fig_ticker.add_trace(go.Scatter(
+                    x=[entry_date], y=[pos_info['entry_price']],
+                    mode='markers', name='購入地点',
+                    marker=dict(color='red', size=12, symbol='star')
+                ))
+                
+                fig_ticker.update_layout(
+                    title=f"{selected_ticker} の値動き（購入日: {entry_date.strftime('%Y-%m-%d')}）",
+                    xaxis_title="日付",
+                    yaxis_title="株価（円）",
+                    height=400,
+                    template='plotly_white'
+                )
+                st.plotly_chart(fig_ticker, use_container_width=True)
+            else:
+                st.warning("チャートデータの取得に失敗しました。")
     else:
         st.info("現在、保有ポジションはありません。")
 

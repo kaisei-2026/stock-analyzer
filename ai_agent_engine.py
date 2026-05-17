@@ -64,35 +64,39 @@ def run_ai_agent_cycle(force_run: bool = False) -> dict:
             current_price = fetch_live_close(ticker)
             
             # 3. 売買判断
-            # スコア75以上なら購入検討
-            if buy_score >= 75 and ticker not in agent["positions"]:
-                # 資金の15%までを1銘柄に投入（1株単位）
-                # 低価格帯を優先して複数銘柄保有を実現
-                budget = agent["cash"] * 0.15
+            # スコア80以上なら強い購入検討
+            if buy_score >= 80 and ticker not in agent["positions"]:
+                # 資金の20%までを1銘柄に投入
+                budget = agent["cash"] * 0.20
                 shares = int(budget // current_price)
-                if shares >= 1:  # 1株単位で購入可能
+                if shares >= 1:
                     cost = shares * current_price
                     agent["cash"] -= cost
                     agent["positions"][ticker] = {
                         "shares": shares,
                         "entry_price": current_price,
-                        "entry_date": now.isoformat()
+                        "entry_date": now.isoformat(),
+                        "entry_score": buy_score
                     }
-                    action = f"BUY {ticker}: {shares}株 @ {current_price:,.1f}円"
+                    action = f"BUY {ticker}: {shares}株 @ {current_price:,.1f}円 (スコア: {buy_score:.1f})"
                     log_entry["actions"].append(action)
-                    agent["history"].insert(0, {"time": now.isoformat(), "action": action, "ticker": ticker})
+                    agent["history"].insert(0, {"time": now.isoformat(), "action": action, "ticker": ticker, "side": "BUY", "price": current_price, "shares": shares})
             
-            # スコア40以下なら売却検討
-            elif buy_score <= 40 and ticker in agent["positions"]:
+            # スコア45以下なら売却検討
+            elif buy_score <= 45 and ticker in agent["positions"]:
                 pos = agent["positions"][ticker]
                 proceeds = pos["shares"] * current_price
                 agent["cash"] += proceeds
                 profit = proceeds - (pos["shares"] * pos["entry_price"])
                 profit_pct = (profit / (pos["shares"] * pos["entry_price"])) * 100 if pos["shares"] * pos["entry_price"] > 0 else 0
-                action = f"SELL {ticker}: {pos['shares']}株 @ {current_price:,.1f}円 (損益: {profit:+,.0f}円, {profit_pct:+.1f}%)"
+                action = f"SELL {ticker}: {pos['shares']}株 @ {current_price:,.1f}円 (損益: {profit:+,.0f}円, スコア: {buy_score:.1f})"
                 log_entry["actions"].append(action)
-                agent["history"].insert(0, {"time": now.isoformat(), "action": action, "ticker": ticker})
+                agent["history"].insert(0, {"time": now.isoformat(), "action": action, "ticker": ticker, "side": "SELL", "price": current_price, "shares": pos["shares"], "profit": profit})
                 del agent["positions"][ticker]
+            
+            # 何もしない場合もログに残す（アクションがない場合のみ）
+            else:
+                pass
                 
         except Exception as e:
             log_entry["actions"].append(f"Error analyzing {ticker}: {str(e)}")
