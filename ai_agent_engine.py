@@ -10,17 +10,22 @@ from data_store import load_ai_agent, save_ai_agent, reset_ai_agent, add_knowled
 from ai_predictor import run_all_predictions
 from market_data import fetch_live_close
 
-def run_ai_agent_cycle() -> dict:
-    """AIエージェントの1サイクル（発掘・分析・売買）を実行する"""
+def run_ai_agent_cycle(force_run: bool = False) -> dict:
+    """AIエージェントの1サイクル（発掘・分析・売買）を実行する
+    
+    Args:
+        force_run: Trueの場合、APIリミッターを無視して実行（初回用）
+    """
     agent = load_ai_agent()
     
-    # APIリミッター: 1時間に1回以上の実行を制限（手動実行は別）
-    now = datetime.now(timezone.utc)
-    if agent["last_run"]:
-        last_run = datetime.fromisoformat(agent["last_run"].replace(" UTC", ""))
-        last_run = last_run.replace(tzinfo=timezone.utc)
-        if (now - last_run).total_seconds() < 3600:
-            return {"ok": False, "message": "APIリミッター作動中。次回の実行までお待ちください。"}
+    # APIリミッター: 1時間に1回以上の実行を制限（force_run=Trueの場合は無視）
+    if not force_run:
+        now = datetime.now(timezone.utc)
+        if agent["last_run"]:
+            last_run = datetime.fromisoformat(agent["last_run"].replace(" UTC", ""))
+            last_run = last_run.replace(tzinfo=timezone.utc)
+            if (now - last_run).total_seconds() < 3600:
+                return {"ok": False, "message": "APIリミッター作動中。次回の実行までお待ちください。"}
 
     # 1. 銘柄発掘
     # ユーザーが設定した監視銘柄があればそれを優先、なければデフォルト銘柄を使用

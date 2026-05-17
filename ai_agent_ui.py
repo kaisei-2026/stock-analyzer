@@ -99,11 +99,11 @@ def render_ai_agent_dashboard() -> None:
         c2.metric("保有ポジション数", agent_stats['position_count'])
         c3.metric("リセット回数", agent_stats['reset_count'])
         
-        # 次回更新までの時間
+        # 次回更新までの時間（確実に表示されるように修正）
         st.markdown("#### ⏰ 次回更新まで")
         last_run = agent_stats.get('last_run')
+        
         if last_run:
-            # 最後の実行時刻から60分後が次回実行予定時刻
             try:
                 last_run_dt = datetime.fromisoformat(last_run.replace(' UTC', '+00:00'))
                 next_run_dt = last_run_dt + timedelta(minutes=60)
@@ -113,13 +113,44 @@ def render_ai_agent_dashboard() -> None:
                 if remaining.total_seconds() > 0:
                     minutes = int(remaining.total_seconds() // 60)
                     seconds = int(remaining.total_seconds() % 60)
-                    st.info(f"⏳ **{minutes}分 {seconds}秒後** に次のサイクルが実行可能になります。")
+                    st.warning(f"⏳ **{minutes}分 {seconds}秒後** に次のサイクルが自動実行されます。")
+                    
+                    # リアルタイムカウントダウン（JavaScriptが動かない場合の予備としてテキストも表示）
+                    countdown_html = f"""
+                    <div id="countdown_v2" style="font-size: 20px; font-weight: bold; padding: 15px; background-color: #e3f2fd; border-radius: 10px; text-align: center; border: 2px solid #2196f3; color: #0d47a1;">
+                        残り {minutes}分 {seconds}秒
+                    </div>
+                    <script>
+                    (function() {{
+                        const nextRunTime = new Date('{next_run_dt.isoformat()}').getTime();
+                        const update = () => {{
+                            const now = new Date().getTime();
+                            const diff = nextRunTime - now;
+                            const el = document.getElementById('countdown_v2');
+                            if (!el) return;
+                            if (diff > 0) {{
+                                const m = Math.floor(diff / 60000);
+                                const s = Math.floor((diff % 60000) / 1000);
+                                el.innerHTML = `⏳ 残り ${{m}}分 ${{s}}秒`;
+                            }} else {{
+                                el.innerHTML = '✅ 実行準備完了！';
+                                el.style.backgroundColor = '#e8f5e9';
+                                el.style.borderColor = '#4caf50';
+                                el.style.color = '#1b5e20';
+                            }}
+                        }};
+                        update();
+                        setInterval(update, 1000);
+                    }})();
+                    </script>
+                    """
+                    st.markdown(countdown_html, unsafe_allow_html=True)
                 else:
                     st.success("✅ 今すぐ実行可能です！")
-            except:
-                st.write("最後の実行: 記録なし")
+            except Exception as e:
+                st.info("最後の実行時刻を確認中...")
         else:
-            st.write("最後の実行: 記録なし")
+            st.success("✅ 初回実行可能です！")
 
     # 3. 資産推移グラフ
     st.markdown("---")
@@ -222,20 +253,26 @@ def render_ai_agent_dashboard() -> None:
     else:
         st.info("現在、購入検討中の銘柄はありません。")
 
-    # 6. AI 操作パネル
+    # 6. AI 操作パネル（目立つように配置）
     st.markdown("---")
     st.markdown("#### 🎮 AI 操作パネル")
     
+    # 状態に関わらずボタンを確実に表示
+    last_run = agent_stats.get('last_run')
+    is_first_run = not last_run
+    
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        if st.button("🤖 今すぐAIサイクルを実行", type="primary", use_container_width=True):
-            with st.spinner("AIが市場を調査中…"):
-                res = run_ai_agent_cycle()
+        btn_label = "🚀 AIサイクルを強制実行（初回リミッター解除）" if is_first_run else "🤖 AIサイクルを手動実行"
+        if st.button(btn_label, type="primary", use_container_width=True, key="force_run_btn"):
+            with st.spinner("AIが最新データを分析中..."):
+                # 初回または前回の実行から時間が経過している場合に実行
+                res = run_ai_agent_cycle(force_run=True) 
                 if res["ok"]:
-                    st.success("サイクル完了！")
+                    st.success("✅ 分析完了！最新の市場状況を反映しました。")
                     st.rerun()
                 else:
-                    st.warning(res.get("message", "エラーが発生しました。"))
+                    st.error(f"実行失敗: {res.get('message', '不明なエラー')}")
     
     with col_btn2:
         if st.button("🔄 AIをリセット（資金をリセット）", use_container_width=True):
